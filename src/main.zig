@@ -2,7 +2,7 @@ const std = @import("std");
 const elaztic = @import("elaztic");
 
 pub fn main() !void {
-    const gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
