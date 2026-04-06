@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  fmt-check:
+    name: Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Check formatting
+        run: zig fmt --check src/ tests/ bench/ build.zig
+
+  unit-tests:
+    name: Unit Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Run unit tests
+        run: zig build test --summary all
+
+  smoke-tests:
+    name: Smoke Tests
+    runs-on: ubuntu-latest
+    services:
+      opensearch:
+        image: opensearchproject/opensearch:2
+        ports:
+          - 9200:9200
+        env:
+          discovery.type: single-node
+          plugins.security.disabled: "true"
+          OPENSEARCH_INITIAL_ADMIN_PASSWORD: "Admin1234!"
+        options: >-
+          --health-cmd "curl -sf http://localhost:9200/_cluster/health || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Run smoke tests
+        run: zig build test-smoke --summary all
+        env:
+          ES_URL: http://localhost:9200
+
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [unit-tests]
+    services:
+      opensearch:
+        image: opensearchproject/opensearch:2
+        ports:
+          - 9200:9200
+        env:
+          discovery.type: single-node
+          plugins.security.disabled: "true"
+          OPENSEARCH_INITIAL_ADMIN_PASSWORD: "Admin1234!"
+        options: >-
+          --health-cmd "curl -sf http://localhost:9200/_cluster/health || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Run integration tests
+        run: zig build test-integration --summary all
+        env:
+          ES_URL: http://localhost:9200
+
+  build-check:
+    name: Build Check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Build (ReleaseSafe)
+        run: zig build -Doptimize=ReleaseSafe
