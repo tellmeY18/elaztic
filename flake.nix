@@ -239,7 +239,12 @@
           };
 
           ci = pkgs.mkShell {
-            buildInputs = [ zigStable ] ++ testHelpers;
+            buildInputs = [
+              zigStable
+              pkgs.opensearch
+              pkgs.jdk21
+            ]
+            ++ testHelpers;
             nativeBuildInputs = with pkgs; [
               git
               curl

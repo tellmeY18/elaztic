@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+# Cancel in-progress runs for the same tag
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Build (${{ matrix.target }})
@@ -29,13 +34,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
 
       - name: Build
-        run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }}
+        run: nix develop .#ci --command zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }}
 
       - name: Create tarball
         run: tar -czf elaztic-${{ github.ref_name }}-${{ matrix.target }}.tar.gz -C zig-out/bin elaztic
@@ -47,14 +53,14 @@ jobs:
           path: elaztic-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
 
   release:
-    name: Release
+    name: Create Release
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - name: Download artifacts
+      - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           pattern: elaztic-*
