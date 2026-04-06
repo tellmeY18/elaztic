@@ -12,6 +12,7 @@ const ser = @import("json/serialize.zig");
 const deser = @import("json/deserialize.zig");
 const err_mod = @import("error.zig");
 const Query = @import("query/builder.zig").Query;
+const bulk_indexer = @import("api/bulk_indexer.zig");
 
 /// Configuration for the Elasticsearch client.
 pub const ClientConfig = struct {
@@ -272,6 +273,21 @@ pub const ESClient = struct {
         const req = search_api.CountRequest{ .index = index, .query = q };
         const resp = try self.executeTyped(search_api.CountResponse, req);
         return resp.count;
+    }
+
+    /// Create a `BulkIndexer` bound to this client's connection pool.
+    ///
+    /// The returned indexer batches documents and flushes them to the `_bulk`
+    /// endpoint when thresholds are exceeded. Call `.deinit()` when done.
+    /// The caller should call `.flush()` before `.deinit()` to send any
+    /// remaining buffered documents.
+    pub fn bulkIndexer(self: *ESClient, config: bulk_indexer.BulkConfig) bulk_indexer.BulkIndexer {
+        return bulk_indexer.BulkIndexer.init(
+            self.allocator,
+            &self.connection_pool,
+            self.config.compression,
+            config,
+        );
     }
 
     // ===================================================================

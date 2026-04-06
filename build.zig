@@ -191,9 +191,23 @@ pub fn build(b: *std.Build) void {
     });
     const run_api_integration_tests = b.addRunArtifact(api_integration_tests);
 
+    // Bulk integration tests (M5 — bulk indexer batching, auto-flush, mixed actions)
+    const bulk_integration_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/bulk_integration.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "elaztic", .module = mod },
+            },
+        }),
+    });
+    const run_bulk_integration_tests = b.addRunArtifact(bulk_integration_tests);
+
     const integration_step = b.step("test-integration", "Run integration tests (requires ES_URL)");
     integration_step.dependOn(&run_integration_tests.step);
     integration_step.dependOn(&run_api_integration_tests.step);
+    integration_step.dependOn(&run_bulk_integration_tests.step);
 
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
@@ -201,6 +215,22 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+
+    // Benchmark executable
+    const bench_exe = b.addExecutable(.{
+        .name = "bulk-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("bench/bulk_bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "elaztic", .module = mod },
+            },
+        }),
+    });
+    const run_bench = b.addRunArtifact(bench_exe);
+    const bench_step = b.step("bench", "Run throughput benchmarks");
+    bench_step.dependOn(&run_bench.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

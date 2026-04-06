@@ -7,6 +7,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Milestone M5 — Bulk Indexer ✅
+
+**Status: Complete**
+**Test backend: Elasticsearch (OpenSearch) on port 9200**
+
+#### Added
+
+- **`src/api/bulk_indexer.zig`** — Bulk indexer for batching documents and flushing to `_bulk`.
+  - `BulkConfig` struct — `max_docs` (default 1000), `max_bytes` (default 5MB), `flush_interval_ms` (reserved).
+  - `BulkIndexer` struct — accumulates NDJSON in a single `ArrayList(u8)` buffer, no per-doc allocation.
+  - `BulkIndexer.init(allocator, *ConnectionPool, compression, BulkConfig)` — creates indexer.
+  - `BulkIndexer.deinit()` — frees buffer (does NOT auto-flush; caller must flush first).
+  - `BulkIndexer.add(comptime T, index, ?id, doc)` — serialize doc to JSON, append NDJSON lines.
+    Returns `?BulkResult` if auto-flush was triggered.
+  - `BulkIndexer.addRaw(index, ?id, json_bytes)` — append pre-serialized JSON (no double-serialize).
+  - `BulkIndexer.addDelete(index, id)` — append delete action (no source line).
+  - `BulkIndexer.flush()` — send buffered NDJSON to `POST /_bulk`, parse `BulkResponse`, reset buffer.
+  - `BulkIndexer.pendingCount()` / `pendingBytes()` — inspect buffered state.
+  - Auto-flush: triggers when `max_docs` or `max_bytes` threshold is exceeded.
+  - Action line format: `{"index":{"_index":"<idx>","_id":"<id>"}}\n` (or `{"delete":...}`).
+  - NDJSON ends with trailing newline (ES requirement).
+  - 10 unit tests: init/deinit, NDJSON format, pending counts, add without ID, mixed actions,
+    empty flush, trailing newline, typed doc serialization, BulkResult.hasFailures.
+
+- **`BulkResult`** — Result of a bulk flush operation.
+  - `total`, `succeeded`, `failed`, `took_ms` — summary counters.
+  - `items: []BulkItemResult` — per-action results for inspection.
+  - `hasFailures()` → `bool`.
+  - `deinit()` — frees underlying `BulkResponse` arena.
+
+- **`src/client.zig`** — Added `ESClient.bulkIndexer(BulkConfig)` convenience method.
+  Returns a `BulkIndexer` bound to the client's connection pool.
+
+- **`src/pool.zig`** — Fixed missing `Content-Type: application/json` header.
+  Now automatically sets the header when a request body is present. This fixes
+  `ESClient` convenience methods (createIndex, putMapping, etc.) which were failing
+  against OpenSearch without the header.
+
+- **`src/root.zig`** — Re-exports `BulkIndexer`, `BulkConfig`, `BulkResult`.
+
+- **`tests/integration/bulk_integration.zig`** — M5 integration tests (6 tests):
+  - `integration_bulk_index_basic` — bulk index 10 docs, flush, verify all succeeded, count confirms 10.
+  - `integration_bulk_auto_flush` — `max_docs=5`, add 7 docs, auto-flush at 5, manual flush for 2, count 7.
+  - `integration_bulk_mixed_actions` — bulk insert 3 + bulk delete 1 + add 1, count stays 3.
+  - `integration_bulk_large_batch` — index 1000 docs in one flush, verify all succeeded.
+  - `integration_bulk_byte_threshold` — `max_bytes=500`, auto-flush triggers on buffer size.
+  - `integration_bulk_empty_flush` — flush with nothing pending, zero result, no error.
+  - All tests use `ESClient` directly via `elaztic` module.
+
+- **`bench/bulk_bench.zig`** — Throughput benchmark harness.
+  - Indexes 50,000 docs with batch size 1000 against localhost OpenSearch.
+  - Reports wall-clock time, ES server time, throughput (docs/sec), avg latency per flush.
+  - Verifies final document count via `client.count()`.
+  - Debug mode: ~17K docs/sec. ReleaseSafe: ~40K docs/sec.
+  - Run with `zig build bench` or `zig build bench -Doptimize=ReleaseSafe`.
+
+- **`build.zig`** — Added `bulk_integration.zig` to `test-integration` step.
+  Added `bench` build step for the throughput benchmark executable.
+
+#### M5 Checklist
+
+- [x] `BulkConfig` struct with `max_docs`, `max_bytes`, `flush_interval_ms` thresholds
+- [x] `BulkIndexer` with single `ArrayList(u8)` buffer — no per-doc allocation
+- [x] `BulkIndexer.add()` — serialize typed doc, append NDJSON action+source lines
+- [x] `BulkIndexer.addRaw()` — append pre-serialized JSON
+- [x] `BulkIndexer.addDelete()` — delete action (no source line)
+- [x] Auto-flush on `max_docs` or `max_bytes` threshold
+- [x] `BulkIndexer.flush()` — POST `/_bulk`, parse `BulkResponse`, return `BulkResult`
+- [x] `BulkIndexer.pendingCount()` / `pendingBytes()` — inspect state
+- [x] NDJSON format: action line + source line + trailing newline
+- [x] `BulkResult` with `total`, `succeeded`, `failed`, `took_ms`, `items`, `hasFailures()`, `deinit()`
+- [x] `ESClient.bulkIndexer(config)` — convenience method
+- [x] `Content-Type: application/json` header fix in `pool.zig`
+- [x] Per-action failure parsing via existing `parseBulkResponse`
+- [x] Unit tests: NDJSON format, pending counts, empty flush, mixed actions
+- [x] Integration tests: 6 tests covering all flush modes against OpenSearch
+- [x] Benchmark: 50K docs, ~40K docs/sec in ReleaseSafe
+- [x] `build.zig` — `bench` step and `bulk_integration.zig` in `test-integration`
+
+#### Deliverable
+
+`BulkIndexer` handles batching, NDJSON serialization, auto-flush on doc count and byte
+size thresholds, and per-action failure reporting. Throughput benchmark achieves ~40K
+docs/sec in ReleaseSafe against localhost OpenSearch. Integration tests verify all
+flush modes — basic, auto-flush, mixed actions, large batch, byte threshold, empty flush.
+
+---
+
 ### Milestone M4 — Core API Operations ✅
 
 **Status: Complete**

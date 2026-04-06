@@ -190,8 +190,10 @@ pub const ConnectionPool = struct {
             // We cannot use the accept_encoding bool array for this because
             // std.http.Client skips "identity" when emitting the header,
             // producing a malformed header line when it's the only entry.
+            const content_type_header: std.http.Header = .{ .name = "Content-Type", .value = "application/json" };
+            const extra_hdrs: []const std.http.Header = if (body != null) &.{content_type_header} else &.{};
             var req = self.http_client.request(http_method, uri, .{
-                .extra_headers = &.{},
+                .extra_headers = extra_hdrs,
                 .headers = if (!compression) .{
                     .accept_encoding = .{ .override = "identity" },
                 } else .{},

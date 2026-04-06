@@ -98,6 +98,18 @@ pub const BulkItemResult = bulk.BulkItemResult;
 /// Parse a raw JSON bulk response body into a `BulkResponse`.
 pub const parseBulkResponse = bulk.parseBulkResponse;
 
+/// Bulk indexer for batching documents and flushing to the _bulk endpoint.
+pub const bulk_indexer = @import("api/bulk_indexer.zig");
+
+/// Bulk indexer that batches documents and auto-flushes on thresholds.
+pub const BulkIndexer = bulk_indexer.BulkIndexer;
+
+/// Configuration for the bulk indexer (max_docs, max_bytes thresholds).
+pub const BulkConfig = bulk_indexer.BulkConfig;
+
+/// Result of a bulk flush operation.
+pub const BulkResult = bulk_indexer.BulkResult;
+
 /// Query DSL builder — comptime-validated, composable query construction.
 pub const query = struct {
     pub const Query = @import("query/builder.zig").Query;
