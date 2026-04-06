@@ -5,6 +5,13 @@
 
 const std = @import("std");
 const pool = @import("pool.zig");
+const index_mgmt = @import("api/index_mgmt.zig");
+const doc_api = @import("api/document.zig");
+const search_api = @import("api/search.zig");
+const ser = @import("json/serialize.zig");
+const deser = @import("json/deserialize.zig");
+const err_mod = @import("error.zig");
+const Query = @import("query/builder.zig").Query;
 
 /// Configuration for the Elasticsearch client.
 pub const ClientConfig = struct {
@@ -170,5 +177,212 @@ pub const ESClient = struct {
             body,
             self.config.compression,
         );
+    }
+
+    // ===================================================================
+    // Convenience methods
+    // ===================================================================
+
+    /// Create an Elasticsearch index.
+    ///
+    /// Optionally accepts index settings (shard/replica counts) and/or a raw
+    /// JSON mappings body. When neither is provided, Elasticsearch applies its
+    /// own defaults.
+    pub fn createIndex(self: *ESClient, index: []const u8, opts: struct {
+        settings: ?index_mgmt.IndexSettings = null,
+        mappings: ?[]const u8 = null,
+    }) !void {
+        const req = index_mgmt.CreateIndexRequest{
+            .index = index,
+            .settings = opts.settings,
+            .mappings = opts.mappings,
+        };
+        try self.executeSimple(req);
+    }
+
+    /// Delete an Elasticsearch index.
+    pub fn deleteIndex(self: *ESClient, index: []const u8) !void {
+        try self.executeSimple(index_mgmt.DeleteIndexRequest{ .index = index });
+    }
+
+    /// Refresh an Elasticsearch index, making recent changes searchable.
+    pub fn refresh(self: *ESClient, index: []const u8) !void {
+        try self.executeSimple(index_mgmt.RefreshRequest{ .index = index });
+    }
+
+    /// Update mappings on an existing index.
+    pub fn putMapping(self: *ESClient, index: []const u8, mapping_body: []const u8) !void {
+        try self.executeSimple(index_mgmt.PutMappingRequest{ .index = index, .body = mapping_body });
+    }
+
+    /// Add an alias for an index.
+    pub fn putAlias(self: *ESClient, index: []const u8, alias: []const u8) !void {
+        try self.executeSimple(index_mgmt.PutAliasRequest{ .index = index, .alias = alias });
+    }
+
+    /// Index (create/update) a document.
+    ///
+    /// Serializes `doc` to JSON, sends it to the `_doc` endpoint, and returns
+    /// the index-document response with the assigned `_id` and `_version`.
+    /// The caller does **not** need to free the returned `IndexDocResponse`
+    /// — its string fields are copies owned by `self.allocator`.
+    pub fn indexDoc(self: *ESClient, comptime T: type, index: []const u8, doc: T, opts: doc_api.IndexDocOptions) !doc_api.IndexDocResponse {
+        const body = try ser.toJson(self.allocator, doc);
+        defer self.allocator.free(body);
+
+        const req = doc_api.IndexDocRequest{
+            .index = index,
+            .id = opts.id,
+            .body = body,
+        };
+
+        return try self.executeTyped(doc_api.IndexDocResponse, req);
+    }
+
+    /// Get a document by ID.
+    ///
+    /// Returns a `Parsed(GetDocResponse(T))` whose arena owns all memory.
+    /// The caller must call `.deinit()` when the result is no longer needed.
+    pub fn getDoc(self: *ESClient, comptime T: type, index: []const u8, id: []const u8) !std.json.Parsed(doc_api.GetDocResponse(T)) {
+        const req = doc_api.GetDocRequest{ .index = index, .id = id };
+        return try self.executeTypedParsed(doc_api.GetDocResponse(T), req);
+    }
+
+    /// Delete a document by ID.
+    pub fn deleteDoc(self: *ESClient, index: []const u8, id: []const u8) !doc_api.DeleteDocResponse {
+        const req = doc_api.DeleteDocRequest{ .index = index, .id = id };
+        return try self.executeTyped(doc_api.DeleteDocResponse, req);
+    }
+
+    /// Search an index with a query.
+    ///
+    /// Returns a `Parsed(SearchResponse(T))` whose arena owns all memory.
+    /// The caller must call `.deinit()` when the result is no longer needed.
+    pub fn searchDocs(self: *ESClient, comptime T: type, index: []const u8, q: ?Query, opts: search_api.SearchOptions) !std.json.Parsed(deser.SearchResponse(T)) {
+        const req = search_api.SearchRequest{
+            .index = index,
+            .query = q,
+            .options = opts,
+        };
+        return try self.executeTypedParsed(deser.SearchResponse(T), req);
+    }
+
+    /// Count documents in an index, optionally filtered by a query.
+    pub fn count(self: *ESClient, index: []const u8, q: ?Query) !u64 {
+        const req = search_api.CountRequest{ .index = index, .query = q };
+        const resp = try self.executeTyped(search_api.CountResponse, req);
+        return resp.count;
+    }
+
+    // ===================================================================
+    // Internal helpers
+    // ===================================================================
+
+    /// Execute a request that expects no meaningful response body (just
+    /// success/failure). On 2xx the body is discarded; on 4xx/5xx the
+    /// error envelope is parsed and the corresponding `ESError` is returned.
+    fn executeSimple(self: *ESClient, req: anytype) !void {
+        const path = try req.httpPath(self.allocator);
+        defer self.allocator.free(path);
+
+        const body = try req.httpBody(self.allocator);
+        defer if (body) |b| self.allocator.free(b);
+
+        const response = try self.connection_pool.sendRequest(
+            self.allocator,
+            req.httpMethod(),
+            path,
+            body,
+            self.config.compression,
+        );
+
+        if (response.status_code >= 200 and response.status_code < 300) {
+            self.allocator.free(response.body);
+            return;
+        }
+
+        return self.handleErrorResponse(response);
+    }
+
+    /// Execute a request and deserialize the response body into type `T`.
+    ///
+    /// Uses `fromJsonLeaky` — all string fields in `T` are copies owned by
+    /// `self.allocator`. The caller is responsible for freeing any such
+    /// fields if `T` requires it (simple response structs with `?[]const u8`
+    /// fields are typically fine to let leak in request-scoped code).
+    fn executeTyped(self: *ESClient, comptime T: type, req: anytype) !T {
+        const path = try req.httpPath(self.allocator);
+        defer self.allocator.free(path);
+
+        const body = try req.httpBody(self.allocator);
+        defer if (body) |b| self.allocator.free(b);
+
+        const response = try self.connection_pool.sendRequest(
+            self.allocator,
+            req.httpMethod(),
+            path,
+            body,
+            self.config.compression,
+        );
+
+        if (response.status_code >= 200 and response.status_code < 300) {
+            defer self.allocator.free(response.body);
+            return deser.fromJsonLeaky(T, self.allocator, response.body) catch {
+                return error.MalformedJson;
+            };
+        }
+
+        return self.handleErrorResponse(response);
+    }
+
+    /// Execute a request and return a `Parsed(T)` with arena ownership.
+    ///
+    /// The caller receives a `std.json.Parsed(T)` whose internal arena owns
+    /// every allocation produced during deserialization. Call `.deinit()` to
+    /// release all memory at once.
+    fn executeTypedParsed(self: *ESClient, comptime T: type, req: anytype) !std.json.Parsed(T) {
+        const path = try req.httpPath(self.allocator);
+        defer self.allocator.free(path);
+
+        const body = try req.httpBody(self.allocator);
+        defer if (body) |b| self.allocator.free(b);
+
+        const response = try self.connection_pool.sendRequest(
+            self.allocator,
+            req.httpMethod(),
+            path,
+            body,
+            self.config.compression,
+        );
+
+        if (response.status_code >= 200 and response.status_code < 300) {
+            defer self.allocator.free(response.body);
+            return deser.fromJson(T, self.allocator, response.body) catch {
+                return error.MalformedJson;
+            };
+        }
+
+        return self.handleErrorResponse(response);
+    }
+
+    /// Handle an error response (4xx/5xx).
+    ///
+    /// Attempts to parse the response body as an Elasticsearch error envelope.
+    /// On success, `parseErrorEnvelope` takes ownership of `response.body`
+    /// (the arena frees it). We extract the typed `ESError`, deinit the
+    /// envelope, and return the error.
+    ///
+    /// If parsing fails (malformed body), we free the body ourselves and
+    /// return `UnexpectedResponse`.
+    fn handleErrorResponse(self: *ESClient, response: pool.HttpResponse) err_mod.ESError {
+        var envelope = err_mod.parseErrorEnvelope(self.allocator, response.body) catch {
+            // parseErrorEnvelope did NOT consume the body on error — free it.
+            self.allocator.free(response.body);
+            return error.UnexpectedResponse;
+        };
+        // envelope's arena now owns the body memory.
+        const es_err = envelope.toESError();
+        envelope.deinit();
+        return es_err;
     }
 };

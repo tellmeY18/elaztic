@@ -529,20 +529,27 @@ fn serializeQueryArray(allocator: Allocator, queries: []const Query) !std.json.V
 
 const testing = std.testing;
 
+/// Result of a roundtrip serialisation: holds both the parsed JSON tree and
+/// the raw JSON bytes so they can be freed together via `deinit`.
+const RoundtripResult = struct {
+    parsed: std.json.Parsed(std.json.Value),
+    json: []const u8,
+
+    fn deinit(self: *const RoundtripResult) void {
+        const allocator = testing.allocator;
+        self.parsed.deinit();
+        allocator.free(self.json);
+    }
+};
+
 /// Helper: serialise a Query to JSON, parse it back, and return the parsed
 /// value for assertions.  Uses a test arena so the caller doesn't need to
 /// worry about freeing.
-fn roundtrip(q: Query) !struct { parsed: std.json.Parsed(std.json.Value), json: []const u8 } {
+fn roundtrip(q: Query) !RoundtripResult {
     const allocator = testing.allocator;
     const json = try q.toJson(allocator);
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
     return .{ .parsed = parsed, .json = json };
-}
-
-fn deinitRoundtrip(rt: *const struct { parsed: std.json.Parsed(std.json.Value), json: []const u8 }) void {
-    const allocator = testing.allocator;
-    rt.parsed.deinit();
-    allocator.free(rt.json);
 }
 
 /// Get an object value from a parsed json Value by key.
@@ -558,7 +565,7 @@ fn getObj(val: std.json.Value, key: []const u8) ?std.json.Value {
 test "term query with bool" {
     const q = Query.term("active", true);
     const rt = try roundtrip(q);
-    defer deinitRoundtrip(&rt);
+    defer rt.deinit();
 
     const root = rt.parsed.value;
     const term_obj = getObj(root, "term") orelse return error.MissingKey;
@@ -569,7 +576,7 @@ test "term query with bool" {
 test "term query with u64" {
     const q = Query.term("module_id", @as(u64, 900000000000207008));
     const rt = try roundtrip(q);
-    defer deinitRoundtrip(&rt);
+    defer rt.deinit();
 
     const root = rt.parsed.value;
     const term_obj = getObj(root, "term") orelse return error.MissingKey;
@@ -580,15 +587,13 @@ test "term query with u64" {
 test "term query with string" {
     const q = Query.term("status", "active");
     const rt = try roundtrip(q);
-    defer deinitRoundtrip(&rt);
+    defer rt.deinit();
 
     const root = rt.parsed.value;
     const term_obj = getObj(root, "term") orelse return error.MissingKey;
     const field_val = getObj(term_obj, "status") orelse return error.MissingKey;
     try testing.expectEqualStrings("active", field_val.string);
 }
-
-// ---- terms query ---------------------------------------------------------
 
 test "terms query with u64 slice" {
     const concept_ids: []const u64 = &.{
@@ -599,7 +604,7 @@ test "terms query with u64 slice" {
     };
     const q = Query.terms("concept_id", concept_ids);
     const rt = try roundtrip(q);
-    defer deinitRoundtrip(&rt);
+    defer rt.deinit();
 
     const root = rt.parsed.value;
     const terms_obj = getObj(root, "terms") orelse return error.MissingKey;
@@ -614,7 +619,7 @@ test "terms query with string slice" {
     const vals: []const []const u8 = &.{ "a", "b", "c" };
     const q = Query.terms("tag", vals);
     const rt = try roundtrip(q);
-    defer deinitRoundtrip(&rt);
+    defer rt.deinit();
 
     const root = rt.parsed.value;
     const terms_obj = getObj(root, "terms") orelse return error.MissingKey;
@@ -628,7 +633,7 @@ test "terms query with string slice" {
 test "match query" {
     const q = Query.match("term", "clinical finding");
     const rt = try roundtrip(q);
-    defer deinitRoundtrip(&rt);
+    defer rt.deinit();
 
     const root = rt.parsed.value;
     const match_obj = getObj(root, "match") orelse return error.MissingKey;
@@ -641,7 +646,7 @@ test "match query" {
 test "match_all query" {
     const q = Query.matchAll();
     const rt = try roundtrip(q);
-    defer deinitRoundtrip(&rt);
+    defer rt.deinit();
 
     const root = rt.parsed.value;
     const ma_obj = getObj(root, "match_all") orelse return error.MissingKey;
@@ -664,7 +669,7 @@ test "bool query with must and filter" {
         .filter = &filter_clauses,
     });
     const rt = try roundtrip(q);
-    defer deinitRoundtrip(&rt);
+    defer rt.deinit();
 
     const root = rt.parsed.value;
     const bool_obj = getObj(root, "bool") orelse return error.MissingKey;
@@ -693,7 +698,7 @@ test "bool query with must and filter" {
 test "range query with gte" {
     const q = Query.range("module_id").gte(@as(u64, 900000000000207008)).build();
     const rt = try roundtrip(q);
-    defer deinitRoundtrip(&rt);
+    defer rt.deinit();
 
     const root = rt.parsed.value;
     const range_obj = getObj(root, "range") orelse return error.MissingKey;
@@ -712,7 +717,7 @@ test "range query with gt and lt" {
         .lt("20210101")
         .build();
     const rt = try roundtrip(q);
-    defer deinitRoundtrip(&rt);
+    defer rt.deinit();
 
     const root = rt.parsed.value;
     const range_obj = getObj(root, "range") orelse return error.MissingKey;
@@ -726,7 +731,7 @@ test "range query with gt and lt" {
 test "exists query" {
     const q = Query.exists("description");
     const rt = try roundtrip(q);
-    defer deinitRoundtrip(&rt);
+    defer rt.deinit();
 
     const root = rt.parsed.value;
     const exists_obj = getObj(root, "exists") orelse return error.MissingKey;
@@ -739,7 +744,7 @@ test "exists query" {
 test "prefix query" {
     const q = Query.prefix("term", "clin");
     const rt = try roundtrip(q);
-    defer deinitRoundtrip(&rt);
+    defer rt.deinit();
 
     const root = rt.parsed.value;
     const prefix_obj = getObj(root, "prefix") orelse return error.MissingKey;
@@ -753,7 +758,7 @@ test "ids query" {
     const vals: []const []const u8 = &.{ "1", "42", "100" };
     const q = Query.ids(vals);
     const rt = try roundtrip(q);
-    defer deinitRoundtrip(&rt);
+    defer rt.deinit();
 
     const root = rt.parsed.value;
     const ids_obj = getObj(root, "ids") orelse return error.MissingKey;
@@ -770,7 +775,7 @@ test "ids query" {
 test "wildcard query" {
     const q = Query.wildcard("term", "clin*");
     const rt = try roundtrip(q);
-    defer deinitRoundtrip(&rt);
+    defer rt.deinit();
 
     const root = rt.parsed.value;
     const wc_obj = getObj(root, "wildcard") orelse return error.MissingKey;
@@ -784,7 +789,7 @@ test "nested query" {
     const inner_q = Query.term("descriptions.lang", "en");
     const q = Query.nested("descriptions", &inner_q);
     const rt = try roundtrip(q);
-    defer deinitRoundtrip(&rt);
+    defer rt.deinit();
 
     const root = rt.parsed.value;
     const nested_obj = getObj(root, "nested") orelse return error.MissingKey;
@@ -826,7 +831,7 @@ test "deeply nested bool" {
     });
 
     const rt = try roundtrip(q);
-    defer deinitRoundtrip(&rt);
+    defer rt.deinit();
 
     const root = rt.parsed.value;
     const outer_bool_obj = getObj(root, "bool") orelse return error.MissingKey;
@@ -862,7 +867,7 @@ test "deeply nested bool" {
 test "term query with negative i64" {
     const q = Query.term("offset", @as(i64, -42));
     const rt = try roundtrip(q);
-    defer deinitRoundtrip(&rt);
+    defer rt.deinit();
 
     const root = rt.parsed.value;
     const term_obj = getObj(root, "term") orelse return error.MissingKey;
@@ -880,7 +885,7 @@ test "range query with all bounds" {
         .lte(@as(i64, 100))
         .build();
     const rt = try roundtrip(q);
-    defer deinitRoundtrip(&rt);
+    defer rt.deinit();
 
     const root = rt.parsed.value;
     const range_obj = getObj(root, "range") orelse return error.MissingKey;
@@ -907,7 +912,7 @@ test "bool query with all clause types" {
     });
 
     const rt = try roundtrip(q);
-    defer deinitRoundtrip(&rt);
+    defer rt.deinit();
 
     const root = rt.parsed.value;
     const bool_obj = getObj(root, "bool") orelse return error.MissingKey;

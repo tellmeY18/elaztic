@@ -26,6 +26,66 @@ pub const ConnectionPool = @import("pool.zig").ConnectionPool;
 /// HTTP response returned by the transport layer.
 pub const HttpResponse = @import("pool.zig").HttpResponse;
 
+/// Index management request/response types (create, delete, refresh, mapping, alias).
+pub const index_mgmt = @import("api/index_mgmt.zig");
+
+/// Request to create an Elasticsearch index.
+pub const CreateIndexRequest = index_mgmt.CreateIndexRequest;
+
+/// Request to delete an Elasticsearch index.
+pub const DeleteIndexRequest = index_mgmt.DeleteIndexRequest;
+
+/// Request to refresh an Elasticsearch index.
+pub const RefreshRequest = index_mgmt.RefreshRequest;
+
+/// Request to update mappings on an existing index.
+pub const PutMappingRequest = index_mgmt.PutMappingRequest;
+
+/// Request to add an alias for an index.
+pub const PutAliasRequest = index_mgmt.PutAliasRequest;
+
+/// Settings for index creation (shard and replica counts).
+pub const IndexSettings = index_mgmt.IndexSettings;
+
+/// Document CRUD request/response types (index, get, delete).
+pub const document = @import("api/document.zig");
+
+/// Request to index (create/update) a document.
+pub const IndexDocRequest = document.IndexDocRequest;
+
+/// Request to get a document by ID.
+pub const GetDocRequest = document.GetDocRequest;
+
+/// Request to delete a document by ID.
+pub const DeleteDocRequest = document.DeleteDocRequest;
+
+/// Response from an index document request.
+pub const IndexDocResponse = document.IndexDocResponse;
+
+/// Response from a delete document request.
+pub const DeleteDocResponse = document.DeleteDocResponse;
+
+/// Response from a get document request, generic over the `_source` document type.
+pub const GetDocResponse = document.GetDocResponse;
+
+/// Options for indexing a document.
+pub const IndexDocOptions = document.IndexDocOptions;
+
+/// Search and count request/response types.
+pub const search = @import("api/search.zig");
+
+/// Request to search an Elasticsearch index.
+pub const SearchRequest = search.SearchRequest;
+
+/// Options for building a search request.
+pub const SearchOptions = search.SearchOptions;
+
+/// Request to count documents in an Elasticsearch index.
+pub const CountRequest = search.CountRequest;
+
+/// Response from a count request.
+pub const CountResponse = search.CountResponse;
+
 /// Bulk API response types and parsing.
 pub const bulk = @import("api/bulk.zig");
 

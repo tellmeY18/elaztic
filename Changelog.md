@@ -7,6 +7,114 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Milestone M4 — Core API Operations ✅
+
+**Status: Complete**
+**Test backend: Elasticsearch (OpenSearch) on port 9200**
+
+#### Added
+
+- **`src/api/index_mgmt.zig`** — Index management request types.
+  - `CreateIndexRequest` — index name, optional `IndexSettings` (shards, replicas), optional mappings JSON.
+  - `DeleteIndexRequest` — index name.
+  - `RefreshRequest` — index name (or `_all`).
+  - `PutMappingRequest` — index name + mapping body (JSON `[]u8`).
+  - `PutAliasRequest` — index name + alias name.
+  - Each type has uniform `httpMethod()`, `httpPath(allocator)`, `httpBody(allocator)` interface.
+  - 21 unit tests: correct HTTP method, path, and body for each request type, including
+    settings-only, mappings-only, both, and neither for CreateIndexRequest.
+
+- **`src/api/document.zig`** — Document CRUD request/response types.
+  - `IndexDocRequest` — index name, optional doc ID, serialized document body.
+    PUT with explicit ID, POST without (auto-generated).
+  - `GetDocRequest` — index name + doc ID.
+  - `DeleteDocRequest` — index name + doc ID.
+  - `GetDocResponse(T)` — generic over `_source` document type, with `_index`, `_id`, `_version`, `found`.
+  - `IndexDocResponse` — `_index`, `_id`, `_version`, `result` ("created"/"updated").
+  - `DeleteDocResponse` — `_index`, `_id`, `_version`, `result` ("deleted"/"not_found").
+  - `IndexDocOptions` — optional doc ID for indexing.
+  - 15 unit tests: method/path generation, body duplication, response deserialization from
+    JSON fixtures (including SNOMED u64 concept IDs).
+
+- **`src/api/search.zig`** — Search and count request/response types.
+  - `SearchRequest` — index name/pattern, optional `Query`, `SearchOptions` (size, from, source filter, aggs).
+  - `SearchRequest.httpBody(allocator)` → full `{"query": {...}, "size": N, ...}` body.
+  - `CountRequest` — index name/pattern, optional query.
+  - `CountResponse` — `count: u64`, optional `ShardsInfo`.
+  - 12 unit tests: path, method, body with all combinations of options, count body with/without
+    query, CountResponse deserialization.
+
+- **`src/client.zig`** — ESClient convenience methods (10 new public methods).
+  - `createIndex(index, opts)` → void (or error).
+  - `deleteIndex(index)` → void (or error).
+  - `refresh(index)` → void.
+  - `putMapping(index, mapping_body)` → void.
+  - `putAlias(index, alias)` → void.
+  - `indexDoc(comptime T, index, doc, opts)` → `IndexDocResponse`.
+  - `getDoc(comptime T, index, id)` → `Parsed(GetDocResponse(T))`.
+  - `deleteDoc(index, id)` → `DeleteDocResponse`.
+  - `searchDocs(comptime T, index, query, opts)` → `Parsed(SearchResponse(T))`.
+  - `count(index, query)` → `u64`.
+  - 3 private generic dispatch helpers: `executeSimple`, `executeTyped`, `executeTypedParsed`.
+  - `handleErrorResponse` — parses `ErrorEnvelope` → `ESError`, proper body ownership handling.
+
+- **`src/request.zig`** — Replaced placeholder structs with real API types.
+  - `ElasticRequest` variants now carry actual request data from `api/` modules.
+  - Added `index_doc` and `put_alias` variants.
+  - Kept placeholders for M5/M6 types (BulkRequest, ScrollRequest, PitOpenRequest, etc.).
+
+- **`src/root.zig`** — Re-exports all new API types:
+  `CreateIndexRequest`, `DeleteIndexRequest`, `RefreshRequest`, `PutMappingRequest`,
+  `PutAliasRequest`, `IndexSettings`, `IndexDocRequest`, `GetDocRequest`, `DeleteDocRequest`,
+  `IndexDocResponse`, `DeleteDocResponse`, `GetDocResponse`, `IndexDocOptions`,
+  `SearchRequest`, `SearchOptions`, `CountRequest`, `CountResponse`.
+
+- **`tests/integration/api_integration.zig`** — M4 integration tests (10 tests):
+  - `integration_create_delete_index` — create with settings, verify exists, delete, verify gone.
+  - `integration_index_get_doc` — index a Concept doc, GET by ID, verify all fields.
+  - `integration_delete_doc` — index a doc, delete it, verify 404 on re-GET.
+  - `integration_search_with_query` — index 3 docs, term query, verify 2 hits.
+  - `integration_count` — count all (3) and filtered (2) via `_count` endpoint.
+  - `integration_refresh` — verify doc not searchable before refresh, searchable after.
+  - `integration_put_mapping` — add new keyword field, verify accepted.
+  - `integration_put_alias` — create alias, search via alias, verify hits.
+  - `integration_index_without_id` — POST without ID, verify auto-generated `_id`.
+  - `integration_error_index_not_found` — search nonexistent index, verify 404.
+  - Each test creates UUID-named index, performs operation, asserts, cleans up.
+
+- **`build.zig`** — Added `api_integration.zig` to the `test-integration` step.
+
+#### M4 Checklist
+
+- [x] `CreateIndexRequest` with optional settings and mappings (`src/api/index_mgmt.zig`)
+- [x] `DeleteIndexRequest` — index name (`src/api/index_mgmt.zig`)
+- [x] `RefreshRequest` — index name or `_all` (`src/api/index_mgmt.zig`)
+- [x] `PutMappingRequest` — index name + mapping body (`src/api/index_mgmt.zig`)
+- [x] `PutAliasRequest` — index name + alias name (`src/api/index_mgmt.zig`)
+- [x] `IndexDocRequest` — PUT with ID / POST without, document body (`src/api/document.zig`)
+- [x] `GetDocRequest` / `GetDocResponse(T)` — typed document retrieval (`src/api/document.zig`)
+- [x] `DeleteDocRequest` / `DeleteDocResponse` (`src/api/document.zig`)
+- [x] `IndexDocResponse` — created/updated result (`src/api/document.zig`)
+- [x] `SearchRequest` with query, size, from, source filter, aggs (`src/api/search.zig`)
+- [x] `CountRequest` / `CountResponse` (`src/api/search.zig`)
+- [x] `ESClient.createIndex`, `deleteIndex`, `refresh`, `putMapping`, `putAlias`
+- [x] `ESClient.indexDoc`, `getDoc`, `deleteDoc`, `searchDocs`, `count`
+- [x] `executeSimple`, `executeTyped`, `executeTypedParsed` generic dispatch helpers
+- [x] `handleErrorResponse` — ErrorEnvelope → ESError mapping
+- [x] `ElasticRequest` tagged union uses real request types from `api/` modules
+- [x] Unit tests: HTTP method, path, body for all request types; response deserialization
+- [x] Integration tests: 10 tests covering all CRUD operations against OpenSearch
+- [x] `build.zig` — `api_integration.zig` added to `test-integration` step
+
+#### Deliverable
+
+Complete CRUD surface. All operations available through `ESClient` convenience methods
+or via typed request structs. Error responses parsed into `ESError` via `ErrorEnvelope`.
+10 integration tests verify every operation against OpenSearch — index lifecycle, document
+CRUD, search, count, refresh, mappings, aliases, auto-ID, and error handling.
+
+---
+
 ### Milestone M3 — Query DSL ✅
 
 **Status: Complete**

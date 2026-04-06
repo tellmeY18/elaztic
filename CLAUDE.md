@@ -333,24 +333,141 @@ types serialize to correct ES JSON. Integration tests pass against OpenSearch.
 ### M4 — Core API Operations (weeks 9–11)
 **Test backend: Elasticsearch (OpenSearch)**
 
-- [ ] `search`, `get`, `index`, `delete`, `count`
-- [ ] `createIndex`, `deleteIndex`, `putMapping`, `putAlias`, `refresh`
-- [ ] Integration test per operation
+#### Phase 1 — Index Management (`src/api/index_mgmt.zig`)
+- [ ] `CreateIndexRequest` — index name, optional settings (shards, replicas), optional mappings JSON
+- [ ] `DeleteIndexRequest` — index name
+- [ ] `RefreshRequest` — index name (or `_all`)
+- [ ] `PutMappingRequest` — index name + mapping body (JSON `[]u8`)
+- [ ] `PutAliasRequest` — index name + alias name
+- [ ] `GetAliasRequest` — alias name, returns list of indices
+- [ ] Each request type has a `toHttpRequest()` → method, path, body
+- [ ] Unit tests: verify correct HTTP method, path, and body for each
 
-Deliverable: Complete CRUD surface.
+#### Phase 2 — Document CRUD (`src/api/document.zig`)
+- [ ] `IndexDocRequest` — index name, optional doc ID, document body (serialized via `serialize.toJson`)
+- [ ] `GetDocRequest` — index name + doc ID, returns typed `T` document
+- [ ] `DeleteDocRequest` — index name + doc ID
+- [ ] `GetDocResponse(T)` — wraps `_index`, `_id`, `_version`, `found`, `_source: T`
+- [ ] `IndexDocResponse` — wraps `_index`, `_id`, `_version`, `result` ("created"/"updated")
+- [ ] `DeleteDocResponse` — wraps `_index`, `_id`, `_version`, `result` ("deleted"/"not_found")
+- [ ] Unit tests: serialize/deserialize round-trips for request/response types
+
+#### Phase 3 — Search & Count (`src/api/search.zig`)
+- [ ] `SearchRequest` — index name/pattern, query (`Query`), optional size/from, optional source filter, optional aggs
+- [ ] `SearchRequest.toJsonBody(allocator)` → full `{"query": {...}, "size": N, ...}` body
+- [ ] `CountRequest` — index name/pattern, optional query
+- [ ] `CountResponse` — `count: u64`, `_shards` info
+- [ ] Reuse `SearchResponse(T)` from `deserialize.zig` for search results
+- [ ] Unit tests: search body serialization with all optional fields
+
+#### Phase 4 — ESClient Execute (`src/client.zig`)
+- [ ] `ESClient.execute(request: ElasticRequest)` — dispatch tagged union to HTTP
+- [ ] For each variant: compute HTTP method, path, body → call `connection_pool.sendRequest`
+- [ ] Parse response: on 2xx → deserialize typed response; on 4xx/5xx → parse `ErrorEnvelope` → return `ESError`
+- [ ] Typed return: `search` → `SearchResponse(T)`, `get` → `GetDocResponse(T)`, etc.
+- [ ] Convenience methods on `ESClient`:
+  - [ ] `search(comptime T, index, query, opts)` → `SearchResponse(T)`
+  - [ ] `getDoc(comptime T, index, id)` → `GetDocResponse(T)`
+  - [ ] `indexDoc(comptime T, index, doc, opts)` → `IndexDocResponse`
+  - [ ] `deleteDoc(index, id)` → `DeleteDocResponse`
+  - [ ] `count(index, query)` → `u64`
+  - [ ] `createIndex(index, opts)` → `void` (or error)
+  - [ ] `deleteIndex(index)` → `void` (or error)
+  - [ ] `refresh(index)` → `void`
+  - [ ] `putMapping(index, mapping_body)` → `void`
+  - [ ] `putAlias(index, alias)` → `void`
+
+#### Phase 5 — Update `request.zig` Tagged Union
+- [ ] Replace placeholder structs with real request types from `api/` modules
+- [ ] `ElasticRequest` variants carry actual data, not empty structs
+- [ ] `ElasticRequest.toHttpMethod()` → `[]const u8`
+- [ ] `ElasticRequest.toPath(allocator)` → `[]u8`
+- [ ] `ElasticRequest.toBody(allocator)` → `?[]u8`
+
+#### Phase 6 — Integration Tests (`tests/integration/api_integration.zig`)
+- [ ] `integration_create_delete_index` — create index with settings, verify exists, delete, verify gone
+- [ ] `integration_index_get_doc` — index a Concept doc, get by ID, verify all fields
+- [ ] `integration_delete_doc` — index a doc, delete it, verify 404 on get
+- [ ] `integration_search_with_query` — index docs, search with term query via client, verify hits
+- [ ] `integration_count` — index docs, count with/without query filter
+- [ ] `integration_refresh` — index doc, refresh, verify searchable
+- [ ] `integration_put_mapping` — create index, add mapping field, verify accepted
+- [ ] `integration_put_alias` — create index, add alias, search via alias
+- [ ] `integration_index_without_id` — index doc without explicit ID, verify auto-generated ID returned
+- [ ] `integration_error_index_not_found` — search on non-existent index, verify `IndexNotFound` error
+- [ ] Each test creates UUID-named index, performs operation, asserts, cleans up
+- [ ] `build.zig` — add `api_integration.zig` to `test-integration` step
+
+Deliverable: Complete CRUD surface. All operations go through `ESClient.execute` or
+typed convenience methods. Error responses parsed into `ESError`. Integration tests
+verify every operation against OpenSearch.
 
 ---
 
 ### M5 — Bulk Indexer (weeks 12–13)
 **Test backend: Elasticsearch (OpenSearch)**
 
-- [ ] `BulkIndexer` with flush thresholds (doc count + byte size)
-- [ ] NDJSON stream builder (no per-doc allocation)
-- [ ] Per-action failure parsing
-- [ ] Parallel flush support
-- [ ] Benchmark: >50K docs/sec on localhost against real ES
+#### Phase 1 — BulkIndexer Core (`src/api/bulk_indexer.zig`)
+- [ ] `BulkConfig` struct — `max_docs`, `max_bytes`, `flush_interval_ms` thresholds
+- [ ] `BulkIndexer` struct — batches documents and flushes to the `_bulk` endpoint
+- [ ] `BulkIndexer.init(allocator, client, config)` — creates indexer tied to an `ESClient`
+- [ ] `BulkIndexer.deinit()` — frees internal buffer, does NOT auto-flush (caller must flush first)
+- [ ] `BulkIndexer.add(index, id, doc)` — serialize doc to JSON, append NDJSON action+source lines
+- [ ] `BulkIndexer.addRaw(index, id, json_bytes)` — append pre-serialized JSON (no double-serialize)
+- [ ] `BulkIndexer.addDelete(index, id)` — append delete action (no source line)
+- [ ] Auto-flush: `add` triggers flush when `max_docs` or `max_bytes` threshold is exceeded
+- [ ] `BulkIndexer.flush()` — send buffered NDJSON to `POST /_bulk`, parse `BulkResponse`, reset buffer
+- [ ] `BulkIndexer.pendingCount()` — number of buffered actions not yet flushed
+- [ ] `BulkIndexer.pendingBytes()` — byte size of the buffered NDJSON payload
+- [ ] Flush returns `BulkResult` with `total`, `succeeded`, `failed`, `items` (per-action results)
+- [ ] Buffer is a single `ArrayList(u8)` — NDJSON lines appended contiguously, no per-doc allocation
+- [ ] Action line format: `{"index":{"_index":"<idx>","_id":"<id>"}}\n` (or `{"delete":...}`)
+- [ ] Unit tests: add docs, verify pending counts, verify NDJSON format, verify auto-flush threshold
 
-Deliverable: Can drive RF2 import workloads.
+#### Phase 2 — NDJSON Builder Internals
+- [ ] `appendActionLine(writer, action, index, id)` — write the action metadata JSON line
+- [ ] `appendSourceLine(writer, json_bytes)` — write the source document JSON line + newline
+- [ ] Action types: `index`, `create`, `delete` (update deferred to M7+)
+- [ ] NDJSON must end with a trailing newline (ES requirement)
+- [ ] No heap allocation per document — all writes go into the shared `ArrayList(u8)` buffer
+- [ ] Unit tests: verify NDJSON output matches ES spec for various action types
+
+#### Phase 3 — ESClient Integration
+- [ ] `ESClient.bulkIndexer(config)` — convenience to create a `BulkIndexer` bound to this client
+- [ ] `BulkIndexer.flush()` uses `ESClient.rawRequest("POST", "/_bulk", ndjson_body)` internally
+- [ ] Response body parsed via existing `parseBulkResponse` from `src/api/bulk.zig`
+- [ ] On partial failure: `BulkResult.failed > 0` but no error returned (caller inspects items)
+- [ ] On transport error: propagate the error from `rawRequest`
+
+#### Phase 4 — BulkResult and Error Reporting
+- [ ] `BulkResult` struct — `total: usize`, `succeeded: usize`, `failed: usize`, `took_ms: u64`
+- [ ] `BulkResult.items` — optional `[]BulkItemResult` for per-action inspection
+- [ ] `BulkResult.hasFailures()` → `bool`
+- [ ] `BulkResult.failedItems()` — iterator/slice over only failed items
+- [ ] `BulkResult.deinit()` — frees the underlying `BulkResponse` arena
+- [ ] Unit tests: verify result counts, hasFailures, failedItems filtering
+
+#### Phase 5 — Integration Tests (`tests/integration/bulk_integration.zig`)
+- [ ] `integration_bulk_index_basic` — bulk index 10 docs, flush, verify all created, search to confirm
+- [ ] `integration_bulk_auto_flush` — set max_docs=5, add 7 docs, verify auto-flush at 5, manual flush for remaining 2
+- [ ] `integration_bulk_mixed_actions` — mix index + delete actions in one bulk, verify results
+- [ ] `integration_bulk_large_batch` — index 1000 docs in one flush, verify count matches
+- [ ] `integration_bulk_byte_threshold` — set max_bytes low, verify auto-flush triggers on size
+- [ ] `integration_bulk_empty_flush` — flush with no pending docs, verify no error and 0 results
+- [ ] `integration_bulk_partial_failure` — index to a read-only index or with bad mapping, verify partial failures reported
+- [ ] Each test creates UUID-named index, performs operations, asserts, cleans up
+- [ ] `build.zig` — add `bulk_integration.zig` to `test-integration` step
+
+#### Phase 6 — Benchmarks (`bench/bulk_bench.zig`)
+- [ ] Benchmark harness: index N docs via `BulkIndexer`, measure wall-clock time
+- [ ] Target: >50K docs/sec on localhost against OpenSearch
+- [ ] Configurable: doc count, batch size, doc size
+- [ ] Print throughput (docs/sec) and latency (ms per flush)
+- [ ] `build.zig` — add `bench` build step
+
+Deliverable: `BulkIndexer` handles batching, NDJSON serialization, auto-flush on
+thresholds, and per-action failure reporting. Can drive RF2 import workloads at
+>50K docs/sec. Integration tests verify all flush modes against OpenSearch.
 
 ---
 

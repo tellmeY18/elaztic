@@ -4,23 +4,42 @@
 //! an Elasticsearch cluster. Each variant contains the specific request data
 //! for that operation type.
 
-/// Placeholder for search request (to be implemented in M3).
-pub const SearchRequest = struct {};
+const index_mgmt = @import("api/index_mgmt.zig");
+const doc_api = @import("api/document.zig");
+const search_api = @import("api/search.zig");
+
+/// Request to search an Elasticsearch index.
+pub const SearchRequest = search_api.SearchRequest;
+
+/// Request to create an Elasticsearch index.
+pub const CreateIndexRequest = index_mgmt.CreateIndexRequest;
+
+/// Request to delete an Elasticsearch index.
+pub const DeleteIndexRequest = index_mgmt.DeleteIndexRequest;
+
+/// Request to get a document by ID.
+pub const GetRequest = doc_api.GetDocRequest;
+
+/// Request to delete a document by ID.
+pub const DeleteRequest = doc_api.DeleteDocRequest;
+
+/// Request to index (create/update) a document.
+pub const IndexRequest = doc_api.IndexDocRequest;
+
+/// Request to update mappings on an existing index.
+pub const PutMappingRequest = index_mgmt.PutMappingRequest;
+
+/// Request to add an alias for an index.
+pub const PutAliasRequest = index_mgmt.PutAliasRequest;
+
+/// Request to refresh an index.
+pub const RefreshRequest = index_mgmt.RefreshRequest;
+
+/// Request to count documents.
+pub const CountRequest = search_api.CountRequest;
 
 /// Placeholder for bulk request (to be implemented in M5).
 pub const BulkRequest = struct {};
-
-/// Placeholder for create index request (to be implemented in M4).
-pub const CreateIndexRequest = struct {};
-
-/// Placeholder for delete index request (to be implemented in M4).
-pub const DeleteIndexRequest = struct {};
-
-/// Placeholder for get document request (to be implemented in M4).
-pub const GetRequest = struct {};
-
-/// Placeholder for delete document request (to be implemented in M4).
-pub const DeleteRequest = struct {};
 
 /// Placeholder for scroll request (to be implemented in M6).
 pub const ScrollRequest = struct {};
@@ -33,15 +52,6 @@ pub const PitOpenRequest = struct {};
 
 /// Placeholder for point-in-time close request (to be implemented in M6).
 pub const PitCloseRequest = struct {};
-
-/// Placeholder for put mapping request (to be implemented in M4).
-pub const PutMappingRequest = struct {};
-
-/// Placeholder for refresh request (to be implemented in M4).
-pub const RefreshRequest = struct {};
-
-/// Placeholder for count request (to be implemented in M4).
-pub const CountRequest = struct {};
 
 /// Tagged union representing all possible Elasticsearch operations.
 /// All operations are dispatched through a single `execute` function on ESClient.
@@ -58,6 +68,8 @@ pub const ElasticRequest = union(enum) {
     get: GetRequest,
     /// Delete document operation.
     delete: DeleteRequest,
+    /// Index (create/update) document operation.
+    index_doc: IndexRequest,
     /// Scroll operation.
     scroll: ScrollRequest,
     /// Clear scroll operation.
@@ -68,6 +80,8 @@ pub const ElasticRequest = union(enum) {
     pit_close: PitCloseRequest,
     /// Put mapping operation.
     put_mapping: PutMappingRequest,
+    /// Put alias operation.
+    put_alias: PutAliasRequest,
     /// Refresh index operation.
     refresh: RefreshRequest,
     /// Count operation.
