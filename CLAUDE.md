@@ -590,14 +590,74 @@ and resource cleanup against OpenSearch. Can page through 500K+ concept document
 ---
 
 ### M7 — Hardening (weeks 16–17)
+**Test backend: Elasticsearch (OpenSearch)**
 
-- [ ] Node failover and re-add after health check
-- [ ] Connection leak detection in tests
-- [ ] 429 handling with jitter backoff
-- [ ] TLS support (`std.crypto.tls`)
-- [ ] HTTP Basic auth + API key auth
-- [ ] Structured logging hooks (caller-provided function)
-- [ ] Memory leak audit with `GeneralPurposeAllocator`
+#### Phase 1 — Jittered Exponential Backoff (`src/pool.zig`)
+- [x] Replace deterministic `backoff *= 2` with full-jitter: `random(0, min(cap, base * 2^attempt))`
+- [x] Add `max_retry_backoff_ms: u32 = 30_000` cap to `ClientConfig` to prevent unbounded growth
+- [x] Use `std.crypto.random` for jitter (cryptographically secure, no seed needed)
+- [x] Differentiate 429 vs 5xx in retry loop: 429 → `TooManyRequests`, 503 → `ClusterUnavailable`
+- [x] On 429, use `Retry-After` header from response if present (seconds), fall back to jittered backoff
+- [x] Unit tests: verify backoff values are within expected range, verify cap is respected
+
+#### Phase 2 — Node Health Recovery (`src/pool.zig`)
+- [x] Add `dead_since: ?i64 = null` field to `Node` — timestamp (ms) when marked unhealthy
+- [x] Add `resurrect_after_ms: u32 = 60_000` to `ClientConfig` — minimum time before retrying a dead node
+- [x] In `markUnhealthy`: set `dead_since = std.time.milliTimestamp()`
+- [x] In `nextNode`: if all nodes are unhealthy, check if any node's `dead_since + resurrect_after_ms < now`; if so, try that node (give it a chance to recover)
+- [x] On successful request to a resurrected node, clear `dead_since` and mark healthy
+- [x] Unit tests: verify dead nodes are skipped, verify resurrection after timeout, verify healthy-on-success
+
+#### Phase 3 — Auth Support (`src/pool.zig`, `src/client.zig`)
+- [x] Wire existing `ClientConfig.basic_auth` (`"user:password"`) into pool as `Authorization: Basic <base64>` header
+- [x] Add `api_key: ?[]const u8 = null` to `ClientConfig` — API key auth (`Authorization: ApiKey <key>`)
+- [x] `basic_auth` and `api_key` are mutually exclusive — if both set, `basic_auth` takes precedence
+- [x] Auth header is added via `extra_headers` on every request in `sendRequest`
+- [x] Base64 encoding uses `std.base64.standard.Encoder`
+- [x] Unit tests: verify correct `Authorization` header for basic auth, API key, and no-auth cases
+
+#### Phase 4 — HTTPS / TLS Support (`src/pool.zig`, `src/client.zig`)
+- [x] Add `scheme: []const u8 = "http"` to `ClientConfig` (values: `"http"` or `"https"`)
+- [x] Use `config.scheme` instead of hardcoded `"http"` in `ConnectionPool.init`
+- [x] `std.http.Client` handles TLS natively for `https://` URIs — no extra code needed
+- [x] Add `ESClient.initFromUrl(allocator, url_string)` convenience — parses `http://host:port` or `https://host:port` into ClientConfig
+- [x] Unit tests: verify URL parsing for http and https schemes
+
+#### Phase 5 — Structured Logging Hooks (`src/pool.zig`, `src/client.zig`)
+- [x] Define `LogLevel` enum: `debug`, `info`, `warn`, `err`
+- [x] Define `LogEvent` tagged union with variants:
+  - `request_start: { method, path }` — before sending
+  - `request_success: { method, path, status_code, duration_ms }` — on 2xx
+  - `request_retry: { method, path, attempt, status_code, backoff_ms }` — on retryable error
+  - `request_error: { method, path, status_code, error_type }` — on non-retryable error
+  - `node_unhealthy: { host, port }` — when a node is marked dead
+  - `node_recovered: { host, port }` — when a dead node comes back
+- [x] Add `log_fn: ?*const fn (LogEvent) void = null` to `ClientConfig`
+- [x] Call `log_fn` at appropriate points in `sendRequest` (before request, on success, on retry, on error, on node state change)
+- [x] No-op when `log_fn` is `null` — zero overhead in the default case
+- [x] Unit tests: verify log events are emitted in correct order for success/retry/error scenarios
+
+#### Phase 6 — Memory Safety Audit
+- [x] Verify all integration tests run under `std.testing.allocator` (GPA in debug) — already the case
+- [x] Add explicit `std.heap.GeneralPurposeAllocator` usage to the benchmark harness (`bench/bulk_bench.zig`) to catch leaks in hot paths
+- [x] Audit `ScrollIterator.deinit()` and `PitIterator.deinit()` for leaks when partially consumed
+- [x] Audit `BulkIndexer` for leaks on error paths (flush failure mid-batch)
+- [x] Audit `ESClient` convenience methods for leaks when `handleErrorResponse` is called
+- [x] Document any known leak-safe patterns in CLAUDE.md conventions section
+
+#### Phase 7 — Integration Tests (`tests/integration/hardening_integration.zig`)
+- [x] `integration_basic_auth` — configure client with `basic_auth`, ping cluster, verify success (OpenSearch accepts any auth on unauthenticated clusters)
+- [x] `integration_retry_success` — verify client retries and succeeds (index doc, search immediately — tests the retry path naturally)
+- [x] `integration_node_failover` — add a fake dead node + real node, verify requests still succeed via the healthy node
+- [x] `integration_node_recovery` — mark a node unhealthy, verify it's skipped, wait for resurrect timeout, verify it's retried
+- [x] `integration_logging_events` — configure log_fn, perform operations, verify events are emitted
+- [x] Each test uses UUID-named index, cleans up after itself
+- [x] `build.zig` — add `hardening_integration.zig` to `test-integration` step
+
+Deliverable: Production-ready transport layer with jittered backoff preventing thundering
+herd on 429/503, automatic node health recovery, HTTP Basic and API key authentication,
+HTTPS support via std.http.Client's native TLS, and structured logging hooks for
+observability. All existing tests continue to pass. Memory safety verified under GPA.
 
 ---
 

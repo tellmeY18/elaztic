@@ -7,6 +7,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Milestone M7 — Hardening ✅
+
+**Status: Complete**
+**Test backend: Elasticsearch (OpenSearch) on port 9200**
+
+#### Added
+
+- **`src/pool.zig`** — Major hardening improvements to the connection pool:
+  - **Jittered exponential backoff**: Replaced deterministic `backoff *= 2` with full-jitter
+    using `std.crypto.random.intRangeAtMost`. Backoff capped by `max_retry_backoff_ms`
+    (default 30s) to prevent unbounded growth. Prevents thundering herd on 429/503.
+  - **Node health recovery**: Added `dead_since: ?i64` to `Node` for tracking when a node
+    was marked unhealthy. When all nodes are unhealthy, `nextNode()` attempts to resurrect
+    the node dead longest (if past `resurrect_after_ms`, default 60s). On successful request,
+    `dead_since` is cleared and the node is marked healthy.
+  - **Auth support**: Pre-computes `Authorization` header at init time. Supports HTTP Basic
+    auth (`Authorization: Basic <base64>`) and API key auth (`Authorization: ApiKey <key>`).
+    Basic auth takes precedence when both are set. Header is added to every request via
+    `extra_headers`.
+  - **HTTPS/TLS support**: Reads `scheme` from config (default `"http"`). Uses it when
+    creating the initial node. `std.http.Client` handles TLS natively for `https://` URIs.
+  - **Structured logging**: Added `LogEvent` tagged union with 6 variants (`request_start`,
+    `request_success`, `request_retry`, `request_error`, `node_unhealthy`, `node_recovered`).
+    Optional `log_fn` callback in config — zero overhead when null. Request timing tracked
+    via `duration_ms` in success events.
+  - **429 vs 5xx differentiation**: Returns `error.TooManyRequests` for 429, `error.ServerError` for 5xx.
+  - 10 unit tests (6 new + 4 updated): node resurrection, jitter bounds, auth headers, scheme config, log emission.
+
+- **`src/client.zig`** — New config fields and convenience methods:
+  - `ClientConfig` extended with: `api_key`, `scheme`, `max_retry_backoff_ms`,
+    `resurrect_after_ms`, `log_fn`.
+  - `ESClient.initFromUrl(allocator, url)` — parses `http://host:port` or `https://host:port`
+    into ClientConfig. Dupes host/scheme strings so they outlive the input URL.
+  - Fixed pre-existing use-after-free in `ping()`: `std.json.Value.jsonParse` hardcodes
+    `.alloc_always`, so all strings lived in the parsed arena and became dangling pointers
+    after `parsed.deinit()`. Now copies `cluster_name` and `status` strings into the
+    client allocator.
+  - `ClusterHealth` now owns its string copies (`_name_copy`, `_status_copy`) instead of
+    referencing the raw response body.
+
+- **`src/root.zig`** — Re-exports `LogEvent` and `LogLevel`.
+
+- **`tests/integration/hardening_integration.zig`** — M7 integration tests (5 tests):
+  - `integration_basic_auth` — client with `basic_auth`, ping + create/delete index + count.
+  - `integration_node_failover` — adds fake dead node (192.0.2.1:19200), verifies operations
+    succeed via healthy node.
+  - `integration_logging_events` — verifies `request_start` and `request_success` events are
+    emitted during ping and createIndex.
+  - `integration_retry_on_failure` — exercises retry machinery with bulk index, search, count.
+  - `integration_scheme_from_config` — explicit `scheme="http"` + `initFromUrl` validation.
+
+- **`build.zig`** — Added `hardening_integration.zig` to `test-integration` step.
+
+#### M7 Checklist
+
+- [x] Jittered exponential backoff with `std.crypto.random`, capped by `max_retry_backoff_ms`
+- [x] Node health recovery: `dead_since` timestamp, `resurrect_after_ms`, oldest-dead-first strategy
+- [x] HTTP Basic auth: `basic_auth` config → `Authorization: Basic <base64>` header
+- [x] API key auth: `api_key` config → `Authorization: ApiKey <key>` header
+- [x] Basic auth takes precedence over API key when both set
+- [x] HTTPS/TLS: `scheme` config field, `std.http.Client` handles TLS natively
+- [x] `ESClient.initFromUrl` — parses URL, dupes host/scheme for correct lifetime
+- [x] `LogEvent` tagged union with 6 event variants
+- [x] `LogLevel` enum (`debug`, `info`, `warn`, `err`)
+- [x] `log_fn` callback in config — zero overhead when null
+- [x] Request timing (`duration_ms`) in success events
+- [x] 429 → `TooManyRequests`, 5xx → `ServerError` differentiation
+- [x] Fixed `ping()` use-after-free: copies strings out of parsed arena
+- [x] `ClusterHealth` owns its strings via `_name_copy` / `_status_copy`
+- [x] Unit tests: 10 tests (node resurrection, jitter bounds, auth, scheme, logging)
+- [x] Integration tests: 5 tests (auth, failover, logging, retry, scheme)
+- [x] `build.zig` — `hardening_integration.zig` in `test-integration` step
+- [x] Memory safety: zero leaks in all tests (GPA-verified)
+
+#### Deliverable
+
+Production-ready transport layer with jittered backoff preventing thundering herd on 429/503,
+automatic node health recovery with oldest-dead-first resurrection, HTTP Basic and API key
+authentication, HTTPS support via std.http.Client's native TLS, and structured logging hooks
+for observability. Pre-existing use-after-free in `ping()` discovered and fixed during memory
+audit. 163 unit tests + 38 integration tests pass with zero memory leaks.
+
+---
+
 ### Milestone M6 — Scroll + PIT ✅
 
 **Status: Complete**

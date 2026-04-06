@@ -34,6 +34,20 @@ pub const ClientConfig = struct {
     compression: bool = true,
     /// Optional HTTP Basic auth credentials ("user:password").
     basic_auth: ?[]const u8 = null,
+    /// Optional API key auth (`Authorization: ApiKey <key>`).
+    /// If both `basic_auth` and `api_key` are set, `basic_auth` takes precedence.
+    api_key: ?[]const u8 = null,
+    /// URL scheme: `"http"` or `"https"`. Defaults to `"http"`.
+    /// `std.http.Client` handles TLS natively for `https://` URIs.
+    scheme: []const u8 = "http",
+    /// Maximum retry backoff in milliseconds (caps exponential growth).
+    max_retry_backoff_ms: u32 = 30_000,
+    /// Minimum time (ms) before retrying a dead node.
+    resurrect_after_ms: u32 = 60_000,
+    /// Optional logging callback. Called with a `LogEvent` at key points
+    /// during request processing (before send, on success, on retry, on error,
+    /// on node state changes). Set to `null` for no logging (zero overhead).
+    log_fn: ?*const fn (pool.LogEvent) void = null,
 };
 
 /// Cluster health response from Elasticsearch.
@@ -47,12 +61,15 @@ pub const ClusterHealth = struct {
     /// Whether the cluster has timed out.
     timed_out: ?bool = null,
 
-    /// The body slice backing `cluster_name` and `status` — caller frees.
-    _raw_body: []u8,
+    /// Allocator-owned copy of cluster_name — freed in deinit.
+    _name_copy: []u8,
+    /// Allocator-owned copy of status — freed in deinit.
+    _status_copy: []u8,
 
     /// Free resources.
     pub fn deinit(self: *ClusterHealth, allocator: std.mem.Allocator) void {
-        allocator.free(self._raw_body);
+        allocator.free(self._name_copy);
+        allocator.free(self._status_copy);
     }
 };
 
@@ -67,6 +84,10 @@ pub const ESClient = struct {
     config: ClientConfig,
     /// Connection pool for HTTP connections.
     connection_pool: pool.ConnectionPool,
+    /// Owned host string from `initFromUrl` (freed in `deinit`), or null.
+    _owned_host: ?[]const u8 = null,
+    /// Owned scheme string from `initFromUrl` (freed in `deinit`), or null.
+    _owned_scheme: ?[]const u8 = null,
 
     /// Initialize a new Elasticsearch client.
     pub fn init(allocator: std.mem.Allocator, config: ClientConfig) !ESClient {
@@ -78,9 +99,48 @@ pub const ESClient = struct {
         };
     }
 
+    /// Initialize a client from a URL string (e.g. `"http://localhost:9200"` or
+    /// `"https://es.example.com:9243"`).
+    ///
+    /// Parses the scheme, host, and port from the URL. The host and scheme
+    /// strings are copied into `allocator`-owned memory so they outlive the
+    /// input URL. They are freed when `deinit()` is called.
+    pub fn initFromUrl(allocator: std.mem.Allocator, url: []const u8) !ESClient {
+        const uri = std.Uri.parse(url) catch return error.InvalidUri;
+        const host_raw: []const u8 = if (uri.host) |h| switch (h) {
+            .raw => |r| r,
+            .percent_encoded => |p| p,
+        } else "localhost";
+        const port: u16 = uri.port orelse 9200;
+        const scheme_raw: []const u8 = if (uri.scheme.len > 0) uri.scheme else "http";
+
+        // Dupe host and scheme so they outlive the caller's URL string.
+        // The Node struct stores slice references, so these must remain
+        // valid for the lifetime of the client.
+        const host_owned = try allocator.dupe(u8, host_raw);
+        errdefer allocator.free(host_owned);
+        const scheme_owned = try allocator.dupe(u8, scheme_raw);
+        errdefer allocator.free(scheme_owned);
+
+        const config = ClientConfig{
+            .host = host_owned,
+            .port = port,
+            .scheme = scheme_owned,
+        };
+
+        var client = try init(allocator, config);
+        // Store owned strings so deinit can free them.
+        client._owned_host = host_owned;
+        client._owned_scheme = scheme_owned;
+        return client;
+    }
+
     /// Deinitialize the client and clean up all resources.
     pub fn deinit(self: *ESClient) void {
         self.connection_pool.deinit();
+        // Free owned strings from initFromUrl, if any.
+        if (self._owned_host) |h| self.allocator.free(h);
+        if (self._owned_scheme) |s| self.allocator.free(s);
     }
 
     /// Add an additional Elasticsearch node to the connection pool.
@@ -107,6 +167,9 @@ pub const ESClient = struct {
         }
 
         // Parse JSON using std.json.
+        // Note: std.json.Value.jsonParse hardcodes .alloc_always, so ALL
+        // string values live in the Parsed arena — NOT in response.body.
+        // We must copy any strings we want to keep before parsed.deinit().
         const parsed = std.json.parseFromSlice(
             std.json.Value,
             self.allocator,
@@ -117,34 +180,34 @@ pub const ESClient = struct {
             return error.MalformedJson;
         };
         defer parsed.deinit();
+        // response.body is no longer needed — strings are in the arena.
+        defer response.deinit(self.allocator);
 
         const root = parsed.value.object;
 
-        const cluster_name = root.get("cluster_name") orelse {
-            response.deinit(self.allocator);
-            return error.MalformedJson;
+        const cluster_name_val = root.get("cluster_name") orelse return error.MalformedJson;
+        const status_val = root.get("status") orelse return error.MalformedJson;
+
+        const cn_str: []const u8 = switch (cluster_name_val) {
+            .string => |s| s,
+            else => return error.MalformedJson,
         };
-        const status = root.get("status") orelse {
-            response.deinit(self.allocator);
-            return error.MalformedJson;
+        const st_str: []const u8 = switch (status_val) {
+            .string => |s| s,
+            else => return error.MalformedJson,
         };
 
+        // Copy strings so they outlive the parsed arena.
+        const name_copy = try self.allocator.dupe(u8, cn_str);
+        errdefer self.allocator.free(name_copy);
+        const status_copy = try self.allocator.dupe(u8, st_str);
+        errdefer self.allocator.free(status_copy);
+
         var health = ClusterHealth{
-            .cluster_name = switch (cluster_name) {
-                .string => |s| s,
-                else => {
-                    response.deinit(self.allocator);
-                    return error.MalformedJson;
-                },
-            },
-            .status = switch (status) {
-                .string => |s| s,
-                else => {
-                    response.deinit(self.allocator);
-                    return error.MalformedJson;
-                },
-            },
-            ._raw_body = response.body,
+            .cluster_name = name_copy,
+            .status = status_copy,
+            ._name_copy = name_copy,
+            ._status_copy = status_copy,
         };
 
         // Extract optional fields.
@@ -161,7 +224,6 @@ pub const ESClient = struct {
             }
         }
 
-        // Transfer body ownership to ClusterHealth — do NOT free response.body.
         return health;
     }
 

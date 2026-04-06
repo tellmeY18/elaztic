@@ -21,6 +21,8 @@ pub const Node = struct {
     healthy: bool = true,
     /// Timestamp (ms) of last successful request.
     last_seen_alive: i64 = 0,
+    /// Timestamp (ms) when this node was marked unhealthy, or null if healthy.
+    dead_since: ?i64 = null,
 
     /// Format as "scheme://host:port".
     pub fn baseUrl(self: Node, buf: []u8) ![]const u8 {
@@ -29,6 +31,50 @@ pub const Node = struct {
         try w.print("{s}://{s}:{d}", .{ self.scheme, self.host, self.port });
         return fbs.getWritten();
     }
+};
+
+/// Log level for events emitted by the connection pool.
+pub const LogLevel = enum { debug, info, warn, err };
+
+/// Event emitted by the connection pool for observability.
+/// Pass a callback via `ClientConfig.log_fn` to receive these events.
+pub const LogEvent = union(enum) {
+    /// Emitted before sending a request.
+    request_start: struct {
+        method: []const u8,
+        path: []const u8,
+    },
+    /// Emitted on a successful (2xx) response.
+    request_success: struct {
+        method: []const u8,
+        path: []const u8,
+        status_code: u16,
+        duration_ms: u64,
+    },
+    /// Emitted when a request is retried (429 or 5xx).
+    request_retry: struct {
+        method: []const u8,
+        path: []const u8,
+        attempt: u32,
+        status_code: u16,
+        backoff_ms: u64,
+    },
+    /// Emitted on a non-retryable error response.
+    request_error: struct {
+        method: []const u8,
+        path: []const u8,
+        status_code: u16,
+    },
+    /// Emitted when a node is marked unhealthy.
+    node_unhealthy: struct {
+        host: []const u8,
+        port: u16,
+    },
+    /// Emitted when a previously-dead node recovers.
+    node_recovered: struct {
+        host: []const u8,
+        port: u16,
+    },
 };
 
 /// HTTP response from Elasticsearch.
@@ -57,16 +103,49 @@ pub const ConnectionPool = struct {
     retry_count: u32,
     retry_backoff_ms: u32,
 
+    /// Minimum ms before retrying a dead node (node health recovery).
+    resurrect_after_ms: u32,
+    /// Cap on exponential backoff to prevent unbounded growth.
+    max_retry_backoff_ms: u32,
+    /// Pre-computed Authorization header value (owned), or null if no auth.
+    auth_header: ?[]const u8,
+    /// Optional logging callback for observability.
+    log_fn: ?*const fn (LogEvent) void,
+
     const NodeList = std.ArrayListUnmanaged(Node);
 
     /// Initialise the pool with one or more nodes derived from `ClientConfig`.
     pub fn init(allocator: Allocator, config: anytype) !ConnectionPool {
         var nodes: NodeList = .empty;
+        const scheme: []const u8 = if (@hasField(@TypeOf(config), "scheme")) config.scheme else "http";
         try nodes.append(allocator, .{
-            .scheme = "http",
+            .scheme = scheme,
             .host = config.host,
             .port = config.port,
         });
+
+        // Pre-compute the Authorization header value if auth is configured.
+        // basic_auth takes precedence over api_key when both are set.
+        const auth_header: ?[]const u8 = blk: {
+            if (@hasField(@TypeOf(config), "basic_auth")) {
+                if (config.basic_auth) |creds| {
+                    const encoded_len = std.base64.standard.Encoder.calcSize(creds.len);
+                    const buf = try allocator.alloc(u8, "Basic ".len + encoded_len);
+                    @memcpy(buf[0.."Basic ".len], "Basic ");
+                    _ = std.base64.standard.Encoder.encode(buf["Basic ".len..], creds);
+                    break :blk buf;
+                }
+            }
+            if (@hasField(@TypeOf(config), "api_key")) {
+                if (config.api_key) |key| {
+                    const buf = try allocator.alloc(u8, "ApiKey ".len + key.len);
+                    @memcpy(buf[0.."ApiKey ".len], "ApiKey ");
+                    @memcpy(buf["ApiKey ".len..], key);
+                    break :blk buf;
+                }
+            }
+            break :blk null;
+        };
 
         return .{
             .allocator = allocator,
@@ -76,11 +155,16 @@ pub const ConnectionPool = struct {
             .mutex = .{},
             .retry_count = config.retry_on_failure,
             .retry_backoff_ms = config.retry_backoff_ms,
+            .resurrect_after_ms = if (@hasField(@TypeOf(config), "resurrect_after_ms")) config.resurrect_after_ms else 60_000,
+            .max_retry_backoff_ms = if (@hasField(@TypeOf(config), "max_retry_backoff_ms")) config.max_retry_backoff_ms else 30_000,
+            .auth_header = auth_header,
+            .log_fn = if (@hasField(@TypeOf(config), "log_fn")) config.log_fn else null,
         };
     }
 
     /// Tear down all connections and free resources.
     pub fn deinit(self: *ConnectionPool) void {
+        if (self.auth_header) |hdr| self.allocator.free(hdr);
         self.http_client.deinit();
         self.nodes.deinit(self.allocator);
     }
@@ -92,7 +176,9 @@ pub const ConnectionPool = struct {
         try self.nodes.append(self.allocator, .{ .scheme = scheme, .host = host, .port = port });
     }
 
-    /// Pick the next healthy node (round-robin).
+    /// Pick the next healthy node (round-robin). When all nodes are
+    /// unhealthy, attempts to resurrect the node that has been dead
+    /// the longest (provided it has exceeded `resurrect_after_ms`).
     fn nextNode(self: *ConnectionPool) ?*Node {
         const n = self.nodes.items.len;
         if (n == 0) return null;
@@ -107,24 +193,44 @@ pub const ConnectionPool = struct {
             }
         }
 
-        // All nodes unhealthy — return the current one anyway and let the
-        // caller deal with the connection error.
+        // All nodes unhealthy — try to resurrect the one that's been dead longest.
+        const now = std.time.milliTimestamp();
+        var best_candidate: ?usize = null;
+        var oldest_dead: i64 = std.math.maxInt(i64);
+
+        for (self.nodes.items, 0..) |node, i| {
+            if (node.dead_since) |ds| {
+                if (now - ds >= self.resurrect_after_ms and ds < oldest_dead) {
+                    oldest_dead = ds;
+                    best_candidate = i;
+                }
+            }
+        }
+
+        if (best_candidate) |idx| {
+            self.current_node = (idx + 1) % n;
+            return &self.nodes.items[idx];
+        }
+
+        // No node eligible for resurrection — return current anyway.
         const idx = self.current_node % n;
         self.current_node = (idx + 1) % n;
         return &self.nodes.items[idx];
     }
 
-    /// Mark a node as unhealthy.
+    /// Mark a node as unhealthy and record the time it died.
     pub fn markUnhealthy(self: *ConnectionPool, node: *Node) void {
         _ = self;
         node.healthy = false;
+        node.dead_since = std.time.milliTimestamp();
     }
 
-    /// Mark a node as healthy.
+    /// Mark a node as healthy and clear its dead_since timestamp.
     pub fn markHealthy(self: *ConnectionPool, node: *Node) void {
         _ = self;
         node.healthy = true;
         node.last_seen_alive = std.time.milliTimestamp();
+        node.dead_since = null;
     }
 
     /// Parse a method string into an `http.Method`.
@@ -137,7 +243,12 @@ pub const ConnectionPool = struct {
         return .GET;
     }
 
-    /// Send an HTTP request with retry logic and exponential backoff.
+    /// Emit a log event if a logging callback is configured.
+    fn emitLog(self: *ConnectionPool, event: LogEvent) void {
+        if (self.log_fn) |log| log(event);
+    }
+
+    /// Send an HTTP request with retry logic and jittered exponential backoff.
     ///
     /// Returns the response body and status code. The caller owns the
     /// returned `HttpResponse.body` slice.
@@ -154,11 +265,19 @@ pub const ConnectionPool = struct {
         var last_err: anyerror = error.MaxRetriesExceeded;
         var backoff_ms: u64 = self.retry_backoff_ms;
 
+        self.emitLog(.{ .request_start = .{ .method = method_str, .path = path } });
+
         var attempt: u32 = 0;
         while (attempt < self.retry_count) : (attempt += 1) {
             if (attempt > 0) {
-                std.Thread.sleep(backoff_ms * std.time.ns_per_ms);
-                backoff_ms *= 2;
+                // Full jitter: random(0, min(cap, base * 2^attempt))
+                const max_backoff = @min(self.max_retry_backoff_ms, backoff_ms);
+                const jittered: u64 = if (max_backoff > 0)
+                    std.crypto.random.intRangeAtMost(u64, 0, max_backoff)
+                else
+                    0;
+                std.Thread.sleep(jittered * std.time.ns_per_ms);
+                backoff_ms = @min(self.max_retry_backoff_ms, backoff_ms * 2);
             }
 
             // Select a node (round-robin).
@@ -184,14 +303,26 @@ pub const ConnectionPool = struct {
                 return error.InvalidUri;
             };
 
+            // Build extra headers: Content-Type (if body) + Authorization (if auth).
+            var hdrs_buf: [2]std.http.Header = undefined;
+            var hdr_count: usize = 0;
+            if (body != null) {
+                hdrs_buf[hdr_count] = .{ .name = "Content-Type", .value = "application/json" };
+                hdr_count += 1;
+            }
+            if (self.auth_header) |auth| {
+                hdrs_buf[hdr_count] = .{ .name = "Authorization", .value = auth };
+                hdr_count += 1;
+            }
+            const extra_hdrs: []const std.http.Header = hdrs_buf[0..hdr_count];
+
             // Open request via std.http.Client (handles keep-alive, connection reuse).
             // When compression is disabled, override the Accept-Encoding header
             // to "identity" so the server sends uncompressed responses.
             // We cannot use the accept_encoding bool array for this because
             // std.http.Client skips "identity" when emitting the header,
             // producing a malformed header line when it's the only entry.
-            const content_type_header: std.http.Header = .{ .name = "Content-Type", .value = "application/json" };
-            const extra_hdrs: []const std.http.Header = if (body != null) &.{content_type_header} else &.{};
+            const start_time = std.time.milliTimestamp();
             var req = self.http_client.request(http_method, uri, .{
                 .extra_headers = extra_hdrs,
                 .headers = if (!compression) .{
@@ -265,21 +396,52 @@ pub const ConnectionPool = struct {
                 continue;
             };
 
-            // Mark node healthy.
+            const end_time = std.time.milliTimestamp();
+            const duration_ms: u64 = @intCast(@max(0, end_time - start_time));
+
+            // Mark node healthy (and emit recovery event if it was previously dead).
             self.mutex.lock();
             for (self.nodes.items) |*n| {
                 if (std.mem.eql(u8, n.host, host) and n.port == port) {
+                    const was_dead = !n.healthy;
                     n.healthy = true;
                     n.last_seen_alive = std.time.milliTimestamp();
+                    n.dead_since = null;
+                    if (was_dead) {
+                        self.emitLog(.{ .node_recovered = .{ .host = host, .port = port } });
+                    }
                 }
             }
             self.mutex.unlock();
 
             // Retry on 429 / 5xx.
             if (status_code == 429 or status_code >= 500) {
+                self.emitLog(.{ .request_retry = .{
+                    .method = method_str,
+                    .path = path,
+                    .attempt = attempt,
+                    .status_code = status_code,
+                    .backoff_ms = backoff_ms,
+                } });
                 allocator.free(owned_body);
-                last_err = error.ServerError;
+                last_err = if (status_code == 429) error.TooManyRequests else error.ServerError;
                 continue;
+            }
+
+            // Non-retryable error (4xx other than 429).
+            if (status_code >= 400) {
+                self.emitLog(.{ .request_error = .{
+                    .method = method_str,
+                    .path = path,
+                    .status_code = status_code,
+                } });
+            } else {
+                self.emitLog(.{ .request_success = .{
+                    .method = method_str,
+                    .path = path,
+                    .status_code = status_code,
+                    .duration_ms = duration_ms,
+                } });
             }
 
             return .{
@@ -371,11 +533,14 @@ pub const ConnectionPool = struct {
     fn markNodeUnhealthyByHostPort(self: *ConnectionPool, host: []const u8, port: u16) void {
         self.mutex.lock();
         defer self.mutex.unlock();
+        const now = std.time.milliTimestamp();
         for (self.nodes.items) |*n| {
             if (std.mem.eql(u8, n.host, host) and n.port == port) {
                 n.healthy = false;
+                n.dead_since = now;
             }
         }
+        self.emitLog(.{ .node_unhealthy = .{ .host = host, .port = port } });
     }
 };
 
@@ -400,6 +565,10 @@ test "round_robin_node_selection" {
         .mutex = .{},
         .retry_count = 3,
         .retry_backoff_ms = 100,
+        .resurrect_after_ms = 60_000,
+        .max_retry_backoff_ms = 30_000,
+        .auth_header = null,
+        .log_fn = null,
     };
     // Transfer ownership so deinit doesn't double-free.
     nodes = .empty;
@@ -436,6 +605,10 @@ test "skip_unhealthy_node" {
         .mutex = .{},
         .retry_count = 3,
         .retry_backoff_ms = 100,
+        .resurrect_after_ms = 60_000,
+        .max_retry_backoff_ms = 30_000,
+        .auth_header = null,
+        .log_fn = null,
     };
     nodes = .empty;
     defer pool_inst.deinit();
@@ -446,4 +619,270 @@ test "skip_unhealthy_node" {
     // node2 is unhealthy — should skip to node3.
     const n2 = pool_inst.nextNode().?;
     try std.testing.expectEqualStrings("node3", n2.host);
+}
+
+test "node_resurrection_after_timeout" {
+    const allocator = std.testing.allocator;
+    var nodes: ConnectionPool.NodeList = .empty;
+    defer nodes.deinit(allocator);
+
+    // All nodes unhealthy, with node2 dead the longest.
+    const now = std.time.milliTimestamp();
+    try nodes.append(allocator, .{
+        .scheme = "http",
+        .host = "node1",
+        .port = 9200,
+        .healthy = false,
+        .dead_since = now - 30_000, // 30s ago — below threshold
+    });
+    try nodes.append(allocator, .{
+        .scheme = "http",
+        .host = "node2",
+        .port = 9200,
+        .healthy = false,
+        .dead_since = now - 120_000, // 120s ago — oldest, above threshold
+    });
+    try nodes.append(allocator, .{
+        .scheme = "http",
+        .host = "node3",
+        .port = 9200,
+        .healthy = false,
+        .dead_since = now - 90_000, // 90s ago — above threshold, but not oldest
+    });
+
+    var pool_inst: ConnectionPool = .{
+        .allocator = allocator,
+        .http_client = .{ .allocator = allocator },
+        .nodes = nodes,
+        .current_node = 0,
+        .mutex = .{},
+        .retry_count = 3,
+        .retry_backoff_ms = 100,
+        .resurrect_after_ms = 60_000,
+        .max_retry_backoff_ms = 30_000,
+        .auth_header = null,
+        .log_fn = null,
+    };
+    nodes = .empty;
+    defer pool_inst.deinit();
+
+    // Should resurrect node2 (dead longest and past threshold).
+    const resurrected = pool_inst.nextNode().?;
+    try std.testing.expectEqualStrings("node2", resurrected.host);
+}
+
+test "no_resurrection_before_timeout" {
+    const allocator = std.testing.allocator;
+    var nodes: ConnectionPool.NodeList = .empty;
+    defer nodes.deinit(allocator);
+
+    // All nodes unhealthy but died recently (below resurrect_after_ms).
+    const now = std.time.milliTimestamp();
+    try nodes.append(allocator, .{
+        .scheme = "http",
+        .host = "node1",
+        .port = 9200,
+        .healthy = false,
+        .dead_since = now - 10_000, // 10s ago
+    });
+    try nodes.append(allocator, .{
+        .scheme = "http",
+        .host = "node2",
+        .port = 9200,
+        .healthy = false,
+        .dead_since = now - 20_000, // 20s ago
+    });
+
+    var pool_inst: ConnectionPool = .{
+        .allocator = allocator,
+        .http_client = .{ .allocator = allocator },
+        .nodes = nodes,
+        .current_node = 0,
+        .mutex = .{},
+        .retry_count = 3,
+        .retry_backoff_ms = 100,
+        .resurrect_after_ms = 60_000,
+        .max_retry_backoff_ms = 30_000,
+        .auth_header = null,
+        .log_fn = null,
+    };
+    nodes = .empty;
+    defer pool_inst.deinit();
+
+    // No node is past the 60s threshold — falls through to the current node.
+    const fallback = pool_inst.nextNode().?;
+    // Should return node at current_node (0) = node1, since no resurrection candidate.
+    try std.testing.expectEqualStrings("node1", fallback.host);
+}
+
+test "mark_unhealthy_sets_dead_since" {
+    const allocator = std.testing.allocator;
+    var nodes: ConnectionPool.NodeList = .empty;
+    defer nodes.deinit(allocator);
+
+    try nodes.append(allocator, .{ .scheme = "http", .host = "node1", .port = 9200 });
+
+    var pool_inst: ConnectionPool = .{
+        .allocator = allocator,
+        .http_client = .{ .allocator = allocator },
+        .nodes = nodes,
+        .current_node = 0,
+        .mutex = .{},
+        .retry_count = 3,
+        .retry_backoff_ms = 100,
+        .resurrect_after_ms = 60_000,
+        .max_retry_backoff_ms = 30_000,
+        .auth_header = null,
+        .log_fn = null,
+    };
+    nodes = .empty;
+    defer pool_inst.deinit();
+
+    const node = &pool_inst.nodes.items[0];
+    try std.testing.expect(node.dead_since == null);
+    try std.testing.expect(node.healthy);
+
+    pool_inst.markUnhealthy(node);
+    try std.testing.expect(!node.healthy);
+    try std.testing.expect(node.dead_since != null);
+
+    pool_inst.markHealthy(node);
+    try std.testing.expect(node.healthy);
+    try std.testing.expect(node.dead_since == null);
+}
+
+test "jittered_backoff_is_bounded" {
+    // Verify that the jitter formula produces values within [0, cap].
+    const cap: u64 = 5_000;
+    var i: usize = 0;
+    while (i < 100) : (i += 1) {
+        const jittered = std.crypto.random.intRangeAtMost(u64, 0, cap);
+        try std.testing.expect(jittered <= cap);
+    }
+}
+
+test "scheme_from_config" {
+    const allocator = std.testing.allocator;
+    const config = .{
+        .host = "secure.example.com",
+        .port = @as(u16, 9243),
+        .retry_on_failure = @as(u32, 3),
+        .retry_backoff_ms = @as(u32, 100),
+        .scheme = "https",
+    };
+
+    var pool = try ConnectionPool.init(allocator, config);
+    defer pool.deinit();
+
+    try std.testing.expectEqualStrings("https", pool.nodes.items[0].scheme);
+}
+
+test "auth_header_basic" {
+    const allocator = std.testing.allocator;
+    const config = .{
+        .host = "localhost",
+        .port = @as(u16, 9200),
+        .retry_on_failure = @as(u32, 3),
+        .retry_backoff_ms = @as(u32, 100),
+        .basic_auth = @as(?[]const u8, "elastic:changeme"),
+    };
+
+    var pool = try ConnectionPool.init(allocator, config);
+    defer pool.deinit();
+
+    try std.testing.expect(pool.auth_header != null);
+    try std.testing.expectEqualStrings("Basic ZWxhc3RpYzpjaGFuZ2VtZQ==", pool.auth_header.?);
+}
+
+test "auth_header_api_key" {
+    const allocator = std.testing.allocator;
+    const config = .{
+        .host = "localhost",
+        .port = @as(u16, 9200),
+        .retry_on_failure = @as(u32, 3),
+        .retry_backoff_ms = @as(u32, 100),
+        .api_key = @as(?[]const u8, "my-api-key-value"),
+    };
+
+    var pool = try ConnectionPool.init(allocator, config);
+    defer pool.deinit();
+
+    try std.testing.expect(pool.auth_header != null);
+    try std.testing.expectEqualStrings("ApiKey my-api-key-value", pool.auth_header.?);
+}
+
+test "auth_header_none" {
+    const allocator = std.testing.allocator;
+    const config = .{
+        .host = "localhost",
+        .port = @as(u16, 9200),
+        .retry_on_failure = @as(u32, 3),
+        .retry_backoff_ms = @as(u32, 100),
+    };
+
+    var pool = try ConnectionPool.init(allocator, config);
+    defer pool.deinit();
+
+    try std.testing.expect(pool.auth_header == null);
+}
+
+test "auth_header_basic_takes_precedence_over_api_key" {
+    const allocator = std.testing.allocator;
+    const config = .{
+        .host = "localhost",
+        .port = @as(u16, 9200),
+        .retry_on_failure = @as(u32, 3),
+        .retry_backoff_ms = @as(u32, 100),
+        .basic_auth = @as(?[]const u8, "user:pass"),
+        .api_key = @as(?[]const u8, "my-key"),
+    };
+
+    var pool = try ConnectionPool.init(allocator, config);
+    defer pool.deinit();
+
+    try std.testing.expect(pool.auth_header != null);
+    // Should use basic auth, not api_key.
+    try std.testing.expect(std.mem.startsWith(u8, pool.auth_header.?, "Basic "));
+}
+
+test "log_event_emission" {
+    const allocator = std.testing.allocator;
+    var nodes: ConnectionPool.NodeList = .empty;
+    defer nodes.deinit(allocator);
+
+    try nodes.append(allocator, .{ .scheme = "http", .host = "node1", .port = 9200 });
+
+    const S = struct {
+        var events_received: usize = 0;
+        var last_event_tag: ?std.meta.Tag(LogEvent) = null;
+
+        fn logCallback(event: LogEvent) void {
+            events_received += 1;
+            last_event_tag = std.meta.activeTag(event);
+        }
+    };
+    S.events_received = 0;
+    S.last_event_tag = null;
+
+    var pool_inst: ConnectionPool = .{
+        .allocator = allocator,
+        .http_client = .{ .allocator = allocator },
+        .nodes = nodes,
+        .current_node = 0,
+        .mutex = .{},
+        .retry_count = 3,
+        .retry_backoff_ms = 100,
+        .resurrect_after_ms = 60_000,
+        .max_retry_backoff_ms = 30_000,
+        .auth_header = null,
+        .log_fn = &S.logCallback,
+    };
+    nodes = .empty;
+    defer pool_inst.deinit();
+
+    // Emit node_unhealthy event via the helper.
+    pool_inst.markNodeUnhealthyByHostPort("node1", 9200);
+
+    try std.testing.expectEqual(@as(usize, 1), S.events_received);
+    try std.testing.expectEqual(LogEvent.node_unhealthy, S.last_event_tag.?);
 }

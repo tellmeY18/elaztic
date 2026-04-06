@@ -185,6 +185,12 @@ pub const deserialize = @import("json/deserialize.zig");
 /// A single Elasticsearch node endpoint.
 pub const Node = @import("pool.zig").Node;
 
+/// Log event types emitted by the connection pool for observability.
+pub const LogEvent = @import("pool.zig").LogEvent;
+
+/// Log level enum used by the connection pool.
+pub const LogLevel = @import("pool.zig").LogLevel;
+
 test {
     // Ensure all public modules compile.
     std.testing.refAllDecls(@This());
