@@ -165,6 +165,22 @@ pub fn build(b: *std.Build) void {
     smoke_step.dependOn(&run_smoke_tests.step);
     smoke_step.dependOn(&run_smoke_roundtrip_tests.step);
 
+    // Integration tests (against Elasticsearch/OpenSearch, M3+ query DSL)
+    const integration_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/query_integration.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "elaztic", .module = mod },
+            },
+        }),
+    });
+    const run_integration_tests = b.addRunArtifact(integration_tests);
+
+    const integration_step = b.step("test-integration", "Run integration tests (requires ES_URL)");
+    integration_step.dependOn(&run_integration_tests.step);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.

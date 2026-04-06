@@ -7,6 +7,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Milestone M3 — Query DSL ✅
+
+**Status: Complete**
+**Test backend: Elasticsearch (OpenSearch) on port 9200**
+
+#### Added
+
+- **`src/query/field.zig`** — Comptime-validated field path accessor.
+  - `FieldPath` struct holding the dotted field name string for ES JSON serialization.
+  - `field(comptime T, comptime name)` — validates field exists via `@hasField`, returns `FieldPath`.
+  - Nested path support: `field(Outer, "inner.value")` splits on `.` and walks struct types at comptime.
+  - Optional unwrapping: paths walk through `?T` fields automatically.
+  - `@compileError` with human-readable messages on invalid fields, empty paths, leading/trailing dots.
+  - Unit tests: simple fields, nested paths, nested through optionals, name preservation.
+
+- **`src/query/builder.zig`** — Comptime query DSL builder for Elasticsearch.
+  - `Query` tagged union with variants for all query types, composable via `std.json.Value` trees.
+  - `Query.term(field_name, value)` → `{"term": {"field": value}}` — supports bool, u64, i64, f64, string.
+  - `Query.terms(field_name, values)` → `{"terms": {"field": [...]}}` — handles large `[]u64` slices.
+  - `Query.match(field_name, text)` → `{"match": {"field": text}}`.
+  - `Query.matchAll()` → `{"match_all": {}}`.
+  - `Query.boolQuery(opts)` with `.must`, `.filter`, `.should`, `.must_not` (each `?[]const Query`).
+  - `Query.range(field_name)` returns `RangeBuilder` with chainable `.gt()`, `.gte()`, `.lt()`, `.lte()`, `.build()`.
+  - `Query.exists(field_name)` → `{"exists": {"field": "name"}}`.
+  - `Query.prefix(field_name, value)` → `{"prefix": {"field": value}}`.
+  - `Query.ids(values)` → `{"ids": {"values": [...]}}`.
+  - `Query.nested(path, query)` → `{"nested": {"path": "...", "query": {...}}}`.
+  - `Query.wildcard(field_name, pattern)` → `{"wildcard": {"field": pattern}}`.
+  - `toJsonValue(allocator)` → `std.json.Value` tree for composability.
+  - `toJson(allocator)` → caller-owned `[]u8` (arena internally for value tree).
+  - Comptime value coercion: `toTermValue`, `toTermsValues`, `toRangeValue` handle comptime_int,
+    signed/unsigned ints, floats, and strings via `@typeInfo`.
+  - 20 unit tests covering every query type, edge cases (negative i64, all range bounds,
+    deeply nested bool, all bool clause types).
+
+- **`src/query/aggregation.zig`** — Aggregation DSL for Elasticsearch.
+  - `Aggregation` struct with `name`, `agg_type` (tagged union), and optional `sub_aggs`.
+  - `Aggregation.termsAgg(name, field_name, size)` → `{"name": {"terms": {"field": "...", "size": N}}}`.
+  - `Aggregation.valueCount(name, field_name)` → `{"name": {"value_count": {"field": "..."}}}`.
+  - `Aggregation.topHits(name, size)` → `{"name": {"top_hits": {"size": N}}}`.
+  - `withSubAggs(sub_aggs)` for nesting aggregations (e.g. terms → top_hits).
+  - `aggsToJsonValue(aggs, allocator)` → full `"aggs"` object value.
+  - `aggsToJson(aggs, allocator)` → caller-owned `[]u8`.
+  - 6 unit tests: each agg type, sub-aggregation nesting, multiple aggs, full round-trip.
+
+- **`src/query/source_filter.zig`** — Source filtering for ES search requests.
+  - `SourceFilter` tagged union with three modes:
+    - `.disabled` → `"_source": false`
+    - `.includes` → `"_source": ["field1", "field2"]`
+    - `.full` → `"_source": {"includes": [...], "excludes": [...]}`
+  - `toJsonValue(allocator)` and `toJson(allocator)` serialization methods.
+  - 6 unit tests: disabled, includes, empty includes, full form, empty full form,
+    disabled-no-allocate.
+
+- **`src/root.zig`** — Re-exports query DSL under `pub const query`:
+  `Query`, `BoolOpts`, `RangeBuilder`, `TermValue`, `TermsValues`, `RangeValue`,
+  `FieldPath`, `field`, `Aggregation`, `SourceFilter`.
+
+- **`tests/integration/query_integration.zig`** — M3 integration tests (6 tests):
+  - `integration_term_query` — index 3 docs, term query on `active=true`, assert 2 hits.
+  - `integration_terms_query` — terms query with `[]u64` concept IDs, assert 2 hits.
+  - `integration_bool_query` — must + filter combination, verify correct count.
+  - `integration_range_query` — range on `module_id` with `.gte()`, verify boundaries.
+  - `integration_match_all` — matchAll query, assert all 3 docs returned.
+  - `integration_exists_query` — filter docs with/without optional field, assert count.
+  - Each test creates UUID-named index, indexes docs, refreshes, queries, asserts, deletes index.
+  - Tests skip automatically if `ES_URL` is not set.
+
+- **`build.zig`** — Added `test-integration` build step wiring up integration test files.
+
+#### M3 Checklist
+
+- [x] `FieldPath` struct with comptime field name validation (`src/query/field.zig`)
+- [x] `field(T, name)` with `@hasField` validation and `@compileError` messages
+- [x] Nested path support: splits on `.` and walks struct types, unwraps optionals
+- [x] `Query.term` — bool, u64, i64, f64, string values
+- [x] `Query.terms` — large `[]u64` slice support
+- [x] `Query.match` — full-text match
+- [x] `Query.matchAll` — match all documents
+- [x] `Query.boolQuery` — must, filter, should, must_not
+- [x] `Query.range` — chainable gt/gte/lt/lte via `RangeBuilder`
+- [x] `Query.exists` — field existence check
+- [x] `Query.prefix` — prefix matching
+- [x] `Query.ids` — document ID filtering
+- [x] `Query.nested` — nested object queries
+- [x] `Query.wildcard` — wildcard pattern matching
+- [x] All queries serialize to `std.json.Value` for composability
+- [x] `Aggregation.termsAgg`, `valueCount`, `topHits` with sub-aggregation nesting
+- [x] `SourceFilter` — disabled, includes, full include/exclude modes
+- [x] Unit tests per query type: construct → serialize → diff against expected JSON
+- [x] Integration tests against ES: 6 tests, each with index lifecycle
+- [x] `build.zig` — `test-integration` step added
+
+#### Deliverable
+
+Full query DSL with compile-time field validation. All query types (term, terms,
+match, matchAll, bool, range, exists, prefix, ids, nested, wildcard) serialize to
+correct ES JSON. Aggregations (terms, value_count, top_hits) with sub-agg nesting.
+Source filtering in all three ES modes. Integration tests pass against OpenSearch.
+
+---
+
 ### Milestone M2 — JSON Infrastructure ✅
 
 **Status: Complete**

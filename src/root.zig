@@ -38,6 +38,27 @@ pub const BulkItemResult = bulk.BulkItemResult;
 /// Parse a raw JSON bulk response body into a `BulkResponse`.
 pub const parseBulkResponse = bulk.parseBulkResponse;
 
+/// Query DSL builder — comptime-validated, composable query construction.
+pub const query = struct {
+    pub const Query = @import("query/builder.zig").Query;
+    pub const BoolOpts = @import("query/builder.zig").BoolOpts;
+    pub const RangeBuilder = @import("query/builder.zig").RangeBuilder;
+    pub const TermValue = @import("query/builder.zig").TermValue;
+    pub const TermsValues = @import("query/builder.zig").TermsValues;
+    pub const RangeValue = @import("query/builder.zig").RangeValue;
+
+    /// Comptime-validated field path accessor.
+    pub const FieldPath = @import("query/field.zig").FieldPath;
+    /// Validates at compile time that `name` exists on struct type `T`.
+    pub const field = @import("query/field.zig").field;
+
+    /// Aggregation DSL for terms, value_count, top_hits, and nested sub-aggregations.
+    pub const Aggregation = @import("query/aggregation.zig").Aggregation;
+
+    /// Source filtering for controlling `_source` field in search results.
+    pub const SourceFilter = @import("query/source_filter.zig").SourceFilter;
+};
+
 /// Comptime JSON serializer pre-configured for Elasticsearch conventions.
 pub const serialize = @import("json/serialize.zig");
 

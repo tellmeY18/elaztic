@@ -274,15 +274,59 @@ Deliverable: Typed round-trip works against Elasticsearch.
 ### M3 — Query DSL (weeks 6–8)
 **Test backend: Elasticsearch (OpenSearch)**
 
-- [ ] `FieldPath(T)` comptime field accessor with nested path support
-- [ ] `Query.term`, `Query.terms`, `Query.bool`, `Query.range`
-- [ ] `Query.nested`, `Query.match`, `Query.ids`, `Query.exists`, `Query.prefix`
-- [ ] Aggregations: `terms`, `value_count`, `top_hits`
-- [ ] Source filtering
-- [ ] Unit tests: serialize each query type, diff against expected ES JSON
-- [ ] Integration tests against ES: execute each query, assert hit counts
+#### Phase 1 — Field Paths (`src/query/field.zig`)
+- [ ] `FieldPath` struct holding comptime field name string
+- [ ] `field(comptime T, comptime name)` — validates field exists via `@hasField`, returns `FieldPath`
+- [ ] Nested path support: `field(Outer, "inner.value")` splits on `.` and walks struct types
+- [ ] `@compileError` with human-readable message on invalid field names
+- [ ] Unit tests: valid field, invalid field (compile error), nested paths, `u64` fields
 
-Deliverable: Full query DSL. Compile-time field validation works.
+#### Phase 2 — Core Query Builders (`src/query/builder.zig`)
+- [ ] `Query` namespace with `toJson(allocator)` → `[]u8` on every query type
+- [ ] `Query.term(field_name, value)` → `{"term": {"field": value}}`
+- [ ] `Query.terms(field_name, values_slice)` → `{"terms": {"field": [...]}}` (large `[]u64` support)
+- [ ] `Query.match(field_name, text)` → `{"match": {"field": text}}`
+- [ ] `Query.matchAll()` → `{"match_all": {}}`
+- [ ] `Query.bool(opts)` with `.must`, `.filter`, `.should`, `.must_not` (each `[]const Query`)
+- [ ] `Query.range(field_name)` with `.gt()`, `.gte()`, `.lt()`, `.lte()` chainable builder
+- [ ] `Query.exists(field_name)` → `{"exists": {"field": "name"}}`
+- [ ] `Query.prefix(field_name, value)` → `{"prefix": {"field": value}}`
+- [ ] `Query.ids(id_slice)` → `{"ids": {"values": [...]}}`
+- [ ] `Query.nested(path, query)` → `{"nested": {"path": "...", "query": {...}}}`
+- [ ] `Query.wildcard(field_name, pattern)` → `{"wildcard": {"field": pattern}}`
+- [ ] All queries serialize to `std.json.Value` (object tree) for composability
+- [ ] Unit tests per query type: construct → serialize → diff against expected JSON string
+
+#### Phase 3 — Aggregations (`src/query/aggregation.zig`)
+- [ ] `Aggregation` namespace with `toJson(allocator)` → `[]u8`
+- [ ] `Aggregation.terms(name, field_name, size)` → `{"name": {"terms": {"field": "...", "size": N}}}`
+- [ ] `Aggregation.valueCount(name, field_name)` → `{"name": {"value_count": {"field": "..."}}}`
+- [ ] `Aggregation.topHits(name, size)` → `{"name": {"top_hits": {"size": N}}}`
+- [ ] Sub-aggregation nesting: `.subAggs(child_agg)` for terms → top_hits patterns
+- [ ] Unit tests per aggregation type
+
+#### Phase 4 — Source Filtering
+- [ ] `_source: false` to exclude source entirely
+- [ ] `_source: ["field1", "field2"]` include list
+- [ ] `_source: {"includes": [...], "excludes": [...]}` full form
+- [ ] Integrated into search request body builder
+- [ ] Unit tests for each source filtering mode
+
+#### Phase 5 — Integration Tests (`tests/integration/`)
+- [ ] `integration_term_query` — index 3 docs, term query on `active=true`, assert hit count
+- [ ] `integration_terms_query` — terms query with `[]u64` concept IDs, assert correct docs returned
+- [ ] `integration_bool_query` — must + filter combination, verify results
+- [ ] `integration_range_query` — range on `module_id` with `.gte()`, verify boundaries
+- [ ] `integration_match_query` — full-text match on a `term` field
+- [ ] `integration_exists_query` — filter docs with/without optional field
+- [ ] `integration_nested_bool` — deeply nested bool with should + must_not
+- [ ] `integration_aggregation_terms` — terms agg on `module_id`, verify bucket counts
+- [ ] `integration_source_filtering` — search with `_source: ["id"]`, verify only `id` returned
+- [ ] Each test creates UUID-named index, indexes docs, refreshes, queries, asserts, deletes index
+- [ ] `build.zig` — add `test-integration` step wiring up integration test files
+
+Deliverable: Full query DSL. Compile-time field validation works. All query
+types serialize to correct ES JSON. Integration tests pass against OpenSearch.
 
 ---
 
