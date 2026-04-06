@@ -40,6 +40,16 @@ jobs:
       - name: Nix cache
         uses: DeterminateSystems/magic-nix-cache-action@main
 
+      - name: Cache Zig build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-release-${{ matrix.target }}-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**') }}
+          restore-keys: |
+            zig-release-${{ matrix.target }}-
+
       - name: Build
         run: nix develop .#ci --command zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }}
 

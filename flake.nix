@@ -7,17 +7,15 @@
     zig.url = "github:mitchellh/zig-overlay";
   };
 
-  outputs =
-    {
-      self,
-      nixpkgs,
-      flake-utils,
-      zig,
-      ...
-    }:
+  outputs = {
+    self,
+    nixpkgs,
+    flake-utils,
+    zig,
+    ...
+  }:
     flake-utils.lib.eachDefaultSystem (
-      system:
-      let
+      system: let
         pkgs = nixpkgs.legacyPackages.${system};
         zigpkgs = zig.packages.${system};
 
@@ -129,25 +127,23 @@
         ];
 
         # Common build inputs
-        buildInputs = [ ];
+        buildInputs = [];
 
-        nativeBuildInputs =
-          with pkgs;
-          [ pkg-config ]
+        nativeBuildInputs = with pkgs;
+          [pkg-config]
           ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
             gdb
             valgrind
           ]
-          ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ lldb ];
+          ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [lldb];
 
         # Library derivation
-        elaztic =
-          zigCompiler:
+        elaztic = zigCompiler:
           pkgs.stdenv.mkDerivation {
             pname = "elaztic";
             version = "0.0.0";
             src = ./.;
-            nativeBuildInputs = [ zigCompiler ] ++ nativeBuildInputs;
+            nativeBuildInputs = [zigCompiler] ++ nativeBuildInputs;
             inherit buildInputs;
             buildPhase = ''
               export HOME=$TMPDIR
@@ -165,19 +161,18 @@
               platforms = platforms.all;
             };
           };
-
-      in
-      {
+      in {
         # Dev shells
         devShells = {
           default = pkgs.mkShell {
-            buildInputs = [
-              zigStable
-              pkgs.opensearch
-              pkgs.jdk21
-            ]
-            ++ buildInputs
-            ++ testHelpers;
+            buildInputs =
+              [
+                zigStable
+                pkgs.opensearch
+                pkgs.jdk21
+              ]
+              ++ buildInputs
+              ++ testHelpers;
             nativeBuildInputs =
               nativeBuildInputs
               ++ (with pkgs; [
@@ -214,13 +209,14 @@
           };
 
           nightly = pkgs.mkShell {
-            buildInputs = [
-              zigMaster
-              pkgs.opensearch
-              pkgs.jdk21
-            ]
-            ++ buildInputs
-            ++ testHelpers;
+            buildInputs =
+              [
+                zigMaster
+                pkgs.opensearch
+                pkgs.jdk21
+              ]
+              ++ buildInputs
+              ++ testHelpers;
             nativeBuildInputs =
               nativeBuildInputs
               ++ (with pkgs; [
@@ -239,12 +235,13 @@
           };
 
           ci = pkgs.mkShell {
-            buildInputs = [
-              zigStable
-              pkgs.opensearch
-              pkgs.jdk21
-            ]
-            ++ testHelpers;
+            buildInputs =
+              [
+                zigStable
+                pkgs.opensearch
+                pkgs.jdk21
+              ]
+              ++ testHelpers;
             nativeBuildInputs = with pkgs; [
               git
               curl
@@ -280,7 +277,7 @@
 
         checks = {
           build = self.packages.${system}.default;
-          format = pkgs.runCommand "format-check" { nativeBuildInputs = [ pkgs.alejandra ]; } ''
+          format = pkgs.runCommand "format-check" {nativeBuildInputs = [pkgs.alejandra];} ''
             alejandra --check ${./.}
             touch $out
           '';

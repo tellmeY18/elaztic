@@ -33,6 +33,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Cache Zig build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-unit-${{ matrix.os }}-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**') }}
+          restore-keys: |
+            zig-unit-${{ matrix.os }}-
       - name: Run unit tests
         run: nix develop .#ci --command zig build test --summary all
 
@@ -47,6 +56,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Cache Zig build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-smoke-${{ matrix.os }}-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**') }}
+          restore-keys: |
+            zig-smoke-${{ matrix.os }}-
       - name: Start OpenSearch
         run: nix develop .#ci --command es-start
       - name: Run smoke tests
@@ -69,6 +87,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Cache Zig build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-integration-${{ matrix.os }}-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**', 'tests/**') }}
+          restore-keys: |
+            zig-integration-${{ matrix.os }}-
       - name: Start OpenSearch
         run: nix develop .#ci --command es-start
       - name: Run integration tests
