@@ -1,0 +1,26 @@
+# Zig build artifacts
+zig-out/
+.zig-cache/
+
+# Nix
+result
+result-*
+
+# ZincSearch local data
+.zinc-data/
+.zinc.log
+.zinc.pid
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Debug
+*.dSYM/
+
+#direnv
+.direnv/
