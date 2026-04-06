@@ -26,6 +26,24 @@ pub const ConnectionPool = @import("pool.zig").ConnectionPool;
 /// HTTP response returned by the transport layer.
 pub const HttpResponse = @import("pool.zig").HttpResponse;
 
+/// Bulk API response types and parsing.
+pub const bulk = @import("api/bulk.zig");
+
+/// Parsed response from the Elasticsearch bulk API.
+pub const BulkResponse = bulk.BulkResponse;
+
+/// Result of a single action in a bulk response.
+pub const BulkItemResult = bulk.BulkItemResult;
+
+/// Parse a raw JSON bulk response body into a `BulkResponse`.
+pub const parseBulkResponse = bulk.parseBulkResponse;
+
+/// Comptime JSON serializer pre-configured for Elasticsearch conventions.
+pub const serialize = @import("json/serialize.zig");
+
+/// Comptime JSON deserializer pre-configured for Elasticsearch response conventions.
+pub const deserialize = @import("json/deserialize.zig");
+
 /// A single Elasticsearch node endpoint.
 pub const Node = @import("pool.zig").Node;
 

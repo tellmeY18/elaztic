@@ -147,8 +147,23 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_smoke_tests = b.addRunArtifact(smoke_tests);
+
+    // Smoke roundtrip tests (M2 — serialize/deserialize round-trips + ZincSearch)
+    const smoke_roundtrip_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/smoke/smoke_roundtrip.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "elaztic", .module = mod },
+            },
+        }),
+    });
+    const run_smoke_roundtrip_tests = b.addRunArtifact(smoke_roundtrip_tests);
+
     const smoke_step = b.step("test-smoke", "Run smoke tests (requires ZINC_URL and ZINC_AUTH)");
     smoke_step.dependOn(&run_smoke_tests.step);
+    smoke_step.dependOn(&run_smoke_roundtrip_tests.step);
 
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
