@@ -13,6 +13,8 @@ const deser = @import("json/deserialize.zig");
 const err_mod = @import("error.zig");
 const Query = @import("query/builder.zig").Query;
 const bulk_indexer = @import("api/bulk_indexer.zig");
+const scroll_mod = @import("api/scroll.zig");
+const pit_mod = @import("api/pit.zig");
 
 /// Configuration for the Elasticsearch client.
 pub const ClientConfig = struct {
@@ -287,6 +289,120 @@ pub const ESClient = struct {
             &self.connection_pool,
             self.config.compression,
             config,
+        );
+    }
+
+    /// Create a `ScrollIterator` for paging through search results.
+    ///
+    /// The iterator handles the scroll lifecycle automatically — it sends
+    /// the initial search, pages through results via `next()`, and clears
+    /// the server-side scroll context on `deinit()`.
+    ///
+    /// The caller must call `deinit()` when done to free resources and
+    /// clear the scroll context. Each call to `next()` returns hits that
+    /// are valid until the next `next()` call or `deinit()`.
+    pub fn scrollSearch(
+        self: *ESClient,
+        comptime T: type,
+        index: []const u8,
+        q: ?Query,
+        opts: search_api.SearchOptions,
+        scroll_duration: []const u8,
+    ) !scroll_mod.ScrollIterator(T) {
+        return scroll_mod.ScrollIterator(T).init(
+            self.allocator,
+            &self.connection_pool,
+            self.config.compression,
+            index,
+            q,
+            opts,
+            scroll_duration,
+        );
+    }
+
+    /// Open a point-in-time (PIT) on an index.
+    ///
+    /// Returns the PIT ID as a heap-allocated string. The caller must
+    /// close the PIT when done (via `closePit`) and free the returned
+    /// `pit_id` string.
+    pub fn openPit(self: *ESClient, index: []const u8, keep_alive: []const u8) ![]u8 {
+        const req = pit_mod.PitOpenRequest{
+            .index = index,
+            .keep_alive = keep_alive,
+        };
+        const path = try req.httpPath(self.allocator);
+        defer self.allocator.free(path);
+
+        const response = try self.connection_pool.sendRequest(
+            self.allocator,
+            req.httpMethod(),
+            path,
+            null,
+            self.config.compression,
+        );
+        defer self.allocator.free(response.body);
+
+        if (response.status_code < 200 or response.status_code >= 300) {
+            return error.UnexpectedResponse;
+        }
+
+        var parsed = deser.fromJson(pit_mod.PitOpenResponse, self.allocator, response.body) catch {
+            return error.MalformedJson;
+        };
+        defer parsed.deinit();
+
+        // Copy the pit_id so it outlives the parsed arena.
+        const pit_id = try self.allocator.dupe(u8, parsed.value.pit_id);
+        return pit_id;
+    }
+
+    /// Close a point-in-time (PIT).
+    ///
+    /// Sends a DELETE request to close the PIT. Errors are propagated
+    /// to the caller. The caller should free the `pit_id` string after
+    /// this call.
+    pub fn closePit(self: *ESClient, pit_id: []const u8) !void {
+        const req = pit_mod.PitCloseRequest{ .pit_id = pit_id };
+
+        const path = try req.httpPath(self.allocator);
+        defer self.allocator.free(path);
+
+        const body = try req.httpBody(self.allocator);
+        defer if (body) |b| self.allocator.free(b);
+
+        const response = try self.connection_pool.sendRequest(
+            self.allocator,
+            req.httpMethod(),
+            path,
+            body,
+            self.config.compression,
+        );
+        self.allocator.free(response.body);
+    }
+
+    /// Create a `PitIterator` for paging through search results using PIT + search_after.
+    ///
+    /// PIT-based pagination is preferred over scroll for read-heavy queries
+    /// because it doesn't hold resources on the server between pages.
+    ///
+    /// The iterator opens a PIT, pages through results via `next()`, and
+    /// closes the PIT on `deinit()`.
+    pub fn pitSearch(
+        self: *ESClient,
+        comptime T: type,
+        index: []const u8,
+        q: ?Query,
+        page_size: u32,
+        keep_alive: []const u8,
+    ) !pit_mod.PitIterator(T) {
+        return pit_mod.PitIterator(T).init(
+            self.allocator,
+            &self.connection_pool,
+            self.config.compression,
+            index,
+            q,
+            page_size,
+            keep_alive,
         );
     }
 

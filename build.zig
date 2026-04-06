@@ -204,10 +204,24 @@ pub fn build(b: *std.Build) void {
     });
     const run_bulk_integration_tests = b.addRunArtifact(bulk_integration_tests);
 
+    // Scroll + PIT integration tests (M6 — scroll iterator, PIT iterator, pagination)
+    const scroll_pit_integration_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/scroll_pit_integration.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "elaztic", .module = mod },
+            },
+        }),
+    });
+    const run_scroll_pit_integration_tests = b.addRunArtifact(scroll_pit_integration_tests);
+
     const integration_step = b.step("test-integration", "Run integration tests (requires ES_URL)");
     integration_step.dependOn(&run_integration_tests.step);
     integration_step.dependOn(&run_api_integration_tests.step);
     integration_step.dependOn(&run_bulk_integration_tests.step);
+    integration_step.dependOn(&run_scroll_pit_integration_tests.step);
 
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will

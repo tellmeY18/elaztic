@@ -7,6 +7,137 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Milestone M6 — Scroll + PIT ✅
+
+**Status: Complete**
+**Test backend: Elasticsearch (OpenSearch) on port 9200**
+
+#### Added
+
+- **`src/api/scroll.zig`** — Scroll API types and iterator for paging through large result sets.
+  - `ScrollSearchRequest` — initial scroll search (`POST /<index>/_search?scroll=<duration>`).
+    Builds the same JSON body as `SearchRequest` (query, size, from, `_source`, aggs).
+  - `ScrollNextRequest` — fetch next page (`POST /_search/scroll`).
+    Body: `{"scroll":"<duration>","scroll_id":"<id>"}`.
+  - `ClearScrollRequest` — clear scroll context (`DELETE /_search/scroll`).
+    Body: `{"scroll_id":"<id>"}`.
+  - `ScrollSearchResponse(T)` — generic response with `_scroll_id`, `hits: HitsEnvelope(T)`, `took`.
+  - `ScrollIterator(T)` — pages through results using a two-page memory strategy:
+    - `init()` sends the initial scroll search and parses the first page.
+    - `next()` returns the current page's hits (valid until next call), then prefetches the next page.
+    - `deinit()` sends `DELETE /_search/scroll` (errors silently ignored) and frees all memory.
+    - Uses `previous_page` / `current_page` to keep returned hits alive until the next `next()` call.
+    - `scroll_id` is an owned copy — survives parsed response arena frees.
+  - 14 unit tests: request method/path/body serialization, response deserialization.
+
+- **`src/api/pit.zig`** — Point-in-Time (PIT) API types and iterator.
+  - `PitOpenRequest` — open a PIT (`POST /<index>/_search/point_in_time?keep_alive=<duration>`), no body.
+  - `PitOpenResponse` — parses `{"pit_id": "..."}` from the open response.
+  - `PitCloseRequest` — close a PIT (`DELETE /_search/point_in_time`).
+    Body: `{"pit_id":"<id>"}`.
+  - `PitSearchRequest` — search with PIT context (`POST /_search`, no index in path).
+    Body includes `pit`, `query`, `size`, `sort`, `search_after`.
+    Defaults to `[{"_doc":"asc"}]` sort when none specified.
+  - `SortField` — sort specification with `field` and `order` strings.
+  - `PitHit(T)` — like `Hit(T)` but with an additional `sort: ?[]const std.json.Value` field
+    for `search_after` pagination.
+  - `PitHitsEnvelope(T)` — hits envelope with `total`, `hits`, `max_score`.
+  - `PitSearchResponse(T)` — response with `pit_id`, `hits`, `took`.
+  - `PitIterator(T)` — pages through results using PIT + `search_after`:
+    - `init()` opens a PIT, sends the initial search, stores the first page.
+    - `next()` returns the current page's hits and prefetches the next page; returns `null` when exhausted.
+    - `deinit()` frees all memory and sends a best-effort `DELETE` to close the server-side PIT.
+    - PIT ID is updated if the server returns a refreshed one.
+    - Only one page of hits is live at a time (previous page freed on next `next()` call).
+  - 14 unit tests: request method/path/body serialization, response deserialization.
+
+- **`src/pool.zig`** — Added `sendBodyForMethodWithoutBody` helper for DELETE-with-body.
+  Zig 0.15's `std.http.Client` hard-asserts in `sendBodyUnflushed` that the HTTP method
+  supports a body (`requestHasBody()` returns `false` for DELETE). Elasticsearch legitimately
+  requires DELETE with a JSON body for clear-scroll, close-PIT, and delete-by-query.
+  The helper replicates the essential parts of the private `sendHead` function, writing the
+  request line, headers (Host, Connection, Accept-Encoding, Content-Length, extra headers),
+  body, and flushing directly to the connection's buffered writer. After this call the
+  connection is in the correct state for `receiveHead`.
+
+- **`src/client.zig`** — Added 4 convenience methods on `ESClient`:
+  - `scrollSearch(comptime T, index, query, opts, scroll_duration)` → `ScrollIterator(T)` —
+    creates and initializes a scroll iterator.
+  - `openPit(index, keep_alive)` → `[]u8` — opens a PIT, returns the `pit_id` as an owned string.
+  - `closePit(pit_id)` → `void` — closes a PIT via DELETE.
+  - `pitSearch(comptime T, index, query, page_size, keep_alive)` → `PitIterator(T)` —
+    creates and initializes a PIT iterator.
+
+- **`src/request.zig`** — Replaced 4 placeholder structs with real types:
+  - `ScrollRequest` → `scroll_api.ScrollSearchRequest`
+  - `ClearScrollRequest` → `scroll_api.ClearScrollRequest`
+  - `PitOpenRequest` → `pit_api.PitOpenRequest`
+  - `PitCloseRequest` → `pit_api.PitCloseRequest`
+
+- **`src/root.zig`** — Re-exports for all new public types:
+  `ScrollSearchRequest`, `ScrollNextRequest`, `ClearScrollRequest`, `ScrollSearchResponse`,
+  `ScrollIterator`, `PitOpenRequest`, `PitOpenResponse`, `PitCloseRequest`, `PitSearchRequest`,
+  `SortField`, `PitSearchResponse`, `PitHit`, `PitIterator`.
+
+- **`tests/integration/scroll_pit_integration.zig`** — M6 integration tests (11 tests):
+  - `integration_scroll_basic` — 25 docs, page size 10, expects 3 pages totaling 25 hits.
+  - `integration_scroll_with_query` — 20 docs with alternating active, term query filters to 10.
+  - `integration_scroll_empty_result` — empty index, `next()` returns null immediately.
+  - `integration_scroll_single_page` — 5 docs, page size 10, all fit in one page.
+  - `integration_scroll_large_dataset` — 500 docs, page size 50, expects 10 pages.
+  - `integration_scroll_auto_clear` — partial consumption then `deinit()` clears scroll context.
+  - `integration_pit_open_close` — explicit open/close PIT lifecycle.
+  - `integration_pit_basic` — 25 docs, page size 10, collects all via PIT iterator.
+  - `integration_pit_with_query` — 20 docs with alternating active, term query filters to 10.
+  - `integration_pit_empty_result` — empty index, `next()` returns null immediately.
+  - `integration_pit_auto_close` — partial consumption then `deinit()` closes PIT.
+  - All tests use `ESClient` directly via `elaztic` module.
+
+- **`build.zig`** — Added `scroll_pit_integration.zig` to `test-integration` step.
+
+- **`CLAUDE.md`** — Documented the `std.http.Client` DELETE-with-body limitation in §3a
+  and enriched M6 section with detailed phase-by-phase checklist.
+
+#### M6 Checklist
+
+- [x] `ScrollSearchRequest` with `httpMethod()`, `httpPath()`, `httpBody()` — initial scroll search
+- [x] `ScrollNextRequest` — fetch next page with scroll_id
+- [x] `ClearScrollRequest` — clear scroll context (`DELETE /_search/scroll` with body)
+- [x] `ScrollSearchResponse(T)` — response with `_scroll_id` field
+- [x] `ScrollIterator(T)` — two-page memory strategy, auto-clear on `deinit()`
+- [x] `ScrollIterator` scroll_id is an owned copy — survives parsed response arena frees
+- [x] `PitOpenRequest` — open PIT (OpenSearch-compatible `/_search/point_in_time` path)
+- [x] `PitOpenResponse` — parse `pit_id` from response
+- [x] `PitCloseRequest` — close PIT (`DELETE /_search/point_in_time` with body)
+- [x] `PitSearchRequest` — search with PIT context, `search_after`, `sort`
+- [x] `PitSearchResponse(T)` — response with refreshed `pit_id`
+- [x] `PitHit(T)` — hit with `sort` values for `search_after` pagination
+- [x] `PitIterator(T)` — PIT + search_after pagination, auto-close on `deinit()`
+- [x] `SortField` struct — sort specification with field and order
+- [x] Default sort `[{"_doc":"asc"}]` for efficient full-index scans
+- [x] `sendBodyForMethodWithoutBody` in pool.zig — DELETE-with-body workaround for Zig 0.15
+- [x] `ESClient.scrollSearch()` — convenience method
+- [x] `ESClient.openPit()` / `closePit()` — explicit PIT lifecycle
+- [x] `ESClient.pitSearch()` — convenience method
+- [x] `request.zig` — replaced 4 M6 placeholder structs with real types
+- [x] `root.zig` — re-exports for all scroll/PIT public types
+- [x] Unit tests: 28 tests (14 scroll + 14 PIT) for request/response serialization
+- [x] Integration tests: 11 tests (6 scroll + 5 PIT) against OpenSearch
+- [x] `build.zig` — `scroll_pit_integration.zig` in `test-integration` step
+- [x] Memory safety: zero leaks in all tests (GPA-verified)
+
+#### Deliverable
+
+`ScrollIterator` and `PitIterator` page through arbitrarily large result sets without
+buffering more than one page in memory. Auto-clear/close on `deinit()` prevents leaked
+server-side resources. Both iterators use the same document type `T` from `SearchResponse`.
+Integration tests verify pagination (25 docs across 3 pages, 500 docs across 10 pages),
+query filtering, empty results, single-page results, and resource cleanup against OpenSearch.
+The DELETE-with-body workaround in pool.zig enables clear-scroll and close-PIT operations
+despite Zig 0.15's `std.http.Client` limitation. 153 unit tests + 33 integration tests pass.
+
+---
+
 ### Milestone M5 — Bulk Indexer ✅
 
 **Status: Complete**

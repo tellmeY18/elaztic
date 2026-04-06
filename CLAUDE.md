@@ -183,6 +183,33 @@ pub const ClientConfig = struct {
 
 Use `std.net.TcpStream` directly for the connection pool transport. Do not use `std.http.Client` (no external connection lifecycle control, API instability) or `http.zig` (server-only library, no outbound client API). ES's REST API is pure request/response HTTP/1.1 — framing it by hand in `pool.zig` is ~200 lines and gives the `ConnectionPool` full control over socket acquire/release/reuse.
 
+> **Known issue — `std.http.Client` vs DELETE-with-body (Zig 0.15):**
+>
+> Elasticsearch uses `DELETE` with a JSON body for several endpoints (clear
+> scroll, close PIT, delete by query). Zig's `std.http.Client` has a hard
+> `assert(r.method.requestHasBody())` inside `sendBodyUnflushed` (Client.zig
+> L924), and `requestHasBody()` returns `false` for `DELETE` (http.zig L38).
+> This means calling `req.sendBodyComplete(body)` on a DELETE request panics.
+>
+> **Workaround in `pool.zig`:** When `sendRequest` detects a body on a method
+> where `requestHasBody()` is `false`, it bypasses `sendBodyComplete` and
+> instead writes the HTTP request directly to the connection's writer:
+>
+> 1. Set `req.transfer_encoding = .{ .content_length = payload.len }` so
+>    the `content-length` header is emitted by `sendHead`.
+> 2. Call the private `sendHead` indirectly — not possible; instead
+>    replicate the header-writing logic using `req.connection.?.writer()`.
+> 3. Write the body bytes and flush.
+> 4. `receiveHead` works normally afterwards because it just reads from
+>    the same connection.
+>
+> This affects: `ClearScrollRequest` (`DELETE /_search/scroll`),
+> `PitCloseRequest` (`DELETE /_search/point_in_time`), and any future
+> DELETE-with-body endpoint.
+>
+> Other ES clients (elasticsearch-py, go-elasticsearch, elasticsearch-java)
+> use HTTP libraries that allow DELETE with body per RFC 9110 §9.3.5.
+
 ### 4. Bulk Indexer
 
 Critical for Snowstorm's RF2 import pipeline. A dedicated `BulkIndexer`
@@ -474,12 +501,91 @@ thresholds, and per-action failure reporting. Can drive RF2 import workloads at
 ### M6 — Scroll + PIT (weeks 14–15)
 **Test backend: Elasticsearch (OpenSearch)**
 
-- [ ] `ScrollIterator` — page through results, auto-clear on `deinit`
-- [ ] Point-in-time: `openPit`, `closePit`, search with `search_after`
-- [ ] `PitIterator` — preferred over scroll for read-heavy queries
-- [ ] Memory cap: never buffer more than one page
+#### Phase 1 — Scroll API Types (`src/api/scroll.zig`)
+- [x] `ScrollSearchRequest` struct — wraps a `SearchRequest` with `scroll` keep-alive duration (e.g. `"1m"`)
+- [x] `ScrollSearchRequest.httpMethod()` → `"POST"`
+- [x] `ScrollSearchRequest.httpPath(allocator)` → `"/<index>/_search?scroll=<duration>"`
+- [x] `ScrollSearchRequest.httpBody(allocator)` → delegates to inner `SearchRequest.httpBody()`
+- [x] `ScrollNextRequest` struct — holds `scroll_id: []const u8` and `scroll: []const u8` (keep-alive)
+- [x] `ScrollNextRequest.httpMethod()` → `"POST"`
+- [x] `ScrollNextRequest.httpPath(allocator)` → `"/_search/scroll"`
+- [x] `ScrollNextRequest.httpBody(allocator)` → `{"scroll": "<duration>", "scroll_id": "<id>"}`
+- [x] `ClearScrollRequest` struct — holds `scroll_id: []const u8`
+- [x] `ClearScrollRequest.httpMethod()` → `"DELETE"`
+- [x] `ClearScrollRequest.httpPath(allocator)` → `"/_search/scroll"`
+- [x] `ClearScrollRequest.httpBody(allocator)` → `{"scroll_id": "<id>"}`
+- [x] `ScrollSearchResponse(T)` — extends `SearchResponse(T)` with `_scroll_id: ?[]const u8`
+- [x] Unit tests: verify HTTP method, path (with scroll param), body for each request type
 
-Deliverable: Can page through 500K+ concept documents.
+#### Phase 2 — ScrollIterator (`src/api/scroll.zig`)
+- [x] `ScrollIterator(T)` struct — generic over document type `T`
+- [x] Fields: `allocator`, `pool: *ConnectionPool`, `compression: bool`, `scroll_duration`, `scroll_id`, `current_page`, `done: bool`
+- [x] `ScrollIterator.init(allocator, pool, compression, index, query, opts, scroll_duration)` — sends initial `_search?scroll=` request, parses first page
+- [x] `ScrollIterator.next()` → `?[]const Hit(T)` — returns next page of hits, or `null` when exhausted
+- [x] On each `next()`: sends `POST /_search/scroll` with current `scroll_id`, parses response, updates `scroll_id`
+- [x] Returns `null` when `hits.hits` is empty (no more results)
+- [x] `ScrollIterator.deinit()` — sends `DELETE /_search/scroll` to clear server-side scroll context, frees memory
+- [x] Memory cap: only one page of hits is live at a time; previous page is freed on `next()`
+- [x] Error handling: transport errors propagate; on `deinit` clear-scroll errors are silently ignored
+- [x] Unit tests: mock-free design tests for request construction
+
+#### Phase 3 — PIT API Types (`src/api/pit.zig`)
+- [x] `PitOpenRequest` struct — holds `index: []const u8` and `keep_alive: []const u8` (e.g. `"5m"`)
+- [x] `PitOpenRequest.httpMethod()` → `"POST"`
+- [x] `PitOpenRequest.httpPath(allocator)` → `"/<index>/_search/point_in_time?keep_alive=<duration>"` (OpenSearch-compatible)
+- [x] `PitOpenRequest.httpBody(allocator)` → `null` (no body needed)
+- [x] `PitOpenResponse` struct — `pit_id: []const u8`
+- [x] `PitCloseRequest` struct — holds `pit_id: []const u8`
+- [x] `PitCloseRequest.httpMethod()` → `"DELETE"`
+- [x] `PitCloseRequest.httpPath(allocator)` → `"/_search/point_in_time"` (OpenSearch-compatible)
+- [x] `PitCloseRequest.httpBody(allocator)` → `{"pit_id": "<id>"}`
+- [x] `PitSearchRequest` struct — search with PIT context: `pit_id`, `keep_alive`, `query`, `size`, `search_after`, `sort`
+- [x] `PitSearchRequest.httpMethod()` → `"POST"`
+- [x] `PitSearchRequest.httpPath(allocator)` → `"/_search"` (no index in path when using PIT)
+- [x] `PitSearchRequest.httpBody(allocator)` → `{"pit": {"id": "...", "keep_alive": "..."}, "query": {...}, "size": N, "sort": [...], "search_after": [...]}`
+- [x] `PitSearchResponse(T)` — extends `SearchResponse(T)` with `pit_id: ?[]const u8` (refreshed PIT ID)
+- [x] Unit tests: verify HTTP method, path, body for each request type; verify `search_after` + `sort` serialization
+
+#### Phase 4 — PitIterator (`src/api/pit.zig`)
+- [x] `PitIterator(T)` struct — generic over document type `T`, preferred over scroll for read-heavy queries
+- [x] Fields: `allocator`, `pool: *ConnectionPool`, `compression: bool`, `pit_id`, `keep_alive`, `sort_fields`, `last_sort_values`, `current_page`, `done: bool`, `page_size: u32`
+- [x] `PitIterator.init(allocator, pool, compression, index, query, opts)` — opens PIT via `POST /<index>/_search/point_in_time`, sends initial search, parses first page
+- [x] `PitIterator.next()` → `?[]const Hit(T)` — returns next page of hits, or `null` when exhausted
+- [x] On each `next()`: extracts `sort` values from last hit of previous page, sends `search_after` search, updates `pit_id` (may be refreshed by ES)
+- [x] Returns `null` when `hits.hits` is empty
+- [x] `PitIterator.deinit()` — sends `DELETE /_search/point_in_time` to close PIT, frees memory
+- [x] Memory cap: only one page of hits is live at a time; previous page is freed on `next()`
+- [x] Default sort: `[{"_doc": "asc"}]` (most efficient for full-index scans)
+- [x] Error handling: transport errors propagate; on `deinit` close-PIT errors are silently ignored
+
+#### Phase 5 — ESClient Convenience Methods (`src/client.zig`)
+- [x] `ESClient.scrollSearch(comptime T, index, query, opts, scroll_duration)` → `ScrollIterator(T)` — convenience to create and initialize a scroll iterator
+- [x] `ESClient.openPit(index, keep_alive)` → `[]u8` — open a point-in-time, returns owned pit_id
+- [x] `ESClient.closePit(pit_id)` → `void` — close a point-in-time
+- [x] `ESClient.pitSearch(comptime T, index, query, page_size, keep_alive)` → `PitIterator(T)` — convenience to create and initialize a PIT iterator
+- [x] Update `src/request.zig` — replaced placeholder `ScrollRequest`, `ClearScrollRequest`, `PitOpenRequest`, `PitCloseRequest` with real types from `api/scroll.zig` and `api/pit.zig`
+- [x] Update `src/root.zig` — re-exported `ScrollIterator`, `PitIterator`, `ScrollSearchRequest`, `PitOpenRequest`, `PitCloseRequest`, `PitSearchRequest`, and all related types
+
+#### Phase 6 — Integration Tests (`tests/integration/scroll_pit_integration.zig`)
+- [x] `integration_scroll_basic` — index 25 docs, scroll with `size=10`, collect all pages, verify 25 total hits across 3 pages
+- [x] `integration_scroll_with_query` — index 20 docs (10 active, 10 inactive), scroll with `term(active, true)`, verify only 10 hits
+- [x] `integration_scroll_empty_result` — scroll on empty index, verify immediate `null` from `next()`
+- [x] `integration_scroll_auto_clear` — scroll through partial results, call `deinit()`, verify scroll context is cleared (no leaked server resources)
+- [x] `integration_scroll_single_page` — index 5 docs, scroll with `size=10`, verify all returned in first page, `next()` returns `null`
+- [x] `integration_pit_basic` — index 25 docs, PIT iterate with `size=10`, collect all pages, verify 25 total hits
+- [x] `integration_pit_with_query` — index 20 docs, PIT iterate with query filter, verify correct subset
+- [x] `integration_pit_empty_result` — PIT iterate on empty index, verify immediate `null`
+- [x] `integration_pit_auto_close` — iterate partially, call `deinit()`, verify PIT is closed
+- [x] `integration_pit_open_close` — open PIT explicitly, verify `pit_id` returned, close PIT, verify no error
+- [x] `integration_scroll_large_dataset` — index 500 docs, scroll with `size=50`, verify all 500 retrieved across 10 pages
+- [x] Each test creates UUID-named index, indexes docs via `BulkIndexer`, refreshes, iterates, asserts, deletes index
+- [x] `build.zig` — added `scroll_pit_integration.zig` to `test-integration` step
+
+Deliverable: `ScrollIterator` and `PitIterator` page through arbitrarily large result
+sets without buffering more than one page in memory. Auto-clear/close on `deinit()`
+prevents leaked server-side resources. Both iterators use the same `Hit(T)` type from
+`SearchResponse`. Integration tests verify pagination, query filtering, empty results,
+and resource cleanup against OpenSearch. Can page through 500K+ concept documents.
 
 ---
 

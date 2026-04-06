@@ -7,6 +7,8 @@
 const index_mgmt = @import("api/index_mgmt.zig");
 const doc_api = @import("api/document.zig");
 const search_api = @import("api/search.zig");
+const scroll_api = @import("api/scroll.zig");
+const pit_api = @import("api/pit.zig");
 
 /// Request to search an Elasticsearch index.
 pub const SearchRequest = search_api.SearchRequest;
@@ -41,17 +43,17 @@ pub const CountRequest = search_api.CountRequest;
 /// Placeholder for bulk request (to be implemented in M5).
 pub const BulkRequest = struct {};
 
-/// Placeholder for scroll request (to be implemented in M6).
-pub const ScrollRequest = struct {};
+/// Request for the initial scroll search.
+pub const ScrollRequest = scroll_api.ScrollSearchRequest;
 
-/// Placeholder for clear scroll request (to be implemented in M6).
-pub const ClearScrollRequest = struct {};
+/// Request to clear a scroll context.
+pub const ClearScrollRequest = scroll_api.ClearScrollRequest;
 
-/// Placeholder for point-in-time open request (to be implemented in M6).
-pub const PitOpenRequest = struct {};
+/// Request to open a point-in-time.
+pub const PitOpenRequest = pit_api.PitOpenRequest;
 
-/// Placeholder for point-in-time close request (to be implemented in M6).
-pub const PitCloseRequest = struct {};
+/// Request to close a point-in-time.
+pub const PitCloseRequest = pit_api.PitCloseRequest;
 
 /// Tagged union representing all possible Elasticsearch operations.
 /// All operations are dispatched through a single `execute` function on ESClient.

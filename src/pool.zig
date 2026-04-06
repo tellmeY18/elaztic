@@ -205,15 +205,34 @@ pub const ConnectionPool = struct {
             defer req.deinit();
 
             // Send headers + body.
-            // Note: std.http.Client asserts that sendBodiless() is only
-            // called for methods that never carry a body (GET, HEAD, etc.).
-            // For POST/PUT/DELETE without a body we send an empty payload.
+            //
+            // std.http.Client has hard asserts:
+            //   - sendBodyComplete asserts requestHasBody() (true for POST/PUT/PATCH)
+            //   - sendBodiless asserts !requestHasBody()
+            //
+            // Elasticsearch uses DELETE with a JSON body for several endpoints
+            // (clear scroll, close PIT, delete by query). Since DELETE's
+            // requestHasBody() returns false, we cannot use sendBodyComplete.
+            // Instead we write the HTTP request manually to the connection's
+            // buffered writer, replicating what the private sendHead() does.
+            // See CLAUDE.md §3a for the full rationale.
             if (body) |payload| {
-                req.sendBodyComplete(@constCast(payload)) catch |err| {
-                    self.markNodeUnhealthyByHostPort(host, port);
-                    last_err = err;
-                    continue;
-                };
+                if (http_method.requestHasBody()) {
+                    // Normal path: POST, PUT, PATCH with body.
+                    req.sendBodyComplete(@constCast(payload)) catch |err| {
+                        self.markNodeUnhealthyByHostPort(host, port);
+                        last_err = err;
+                        continue;
+                    };
+                } else {
+                    // DELETE (or GET) with body — bypass the assert by writing
+                    // the raw HTTP request to the connection writer.
+                    sendBodyForMethodWithoutBody(&req, payload) catch |err| {
+                        self.markNodeUnhealthyByHostPort(host, port);
+                        last_err = err;
+                        continue;
+                    };
+                }
             } else if (http_method.requestHasBody()) {
                 req.sendBodyComplete(@constCast(@as([]const u8, ""))) catch |err| {
                     self.markNodeUnhealthyByHostPort(host, port);
@@ -270,6 +289,82 @@ pub const ConnectionPool = struct {
         }
 
         return last_err;
+    }
+
+    /// Write a full HTTP request (head + body) to the connection writer for
+    /// methods where `requestHasBody()` returns `false` (e.g. DELETE).
+    ///
+    /// Zig 0.15's `std.http.Client` hard-asserts in `sendBodyUnflushed` that
+    /// the method supports a body. Elasticsearch legitimately requires DELETE
+    /// with a JSON body for clear-scroll, close-PIT, and delete-by-query.
+    ///
+    /// This function replicates the essential parts of the private `sendHead`
+    /// function, sets `Content-Length`, writes the body, and flushes. After
+    /// this call the connection is in the correct state for `receiveHead`.
+    fn sendBodyForMethodWithoutBody(req: *http.Client.Request, payload: []const u8) !void {
+        const connection = req.connection orelse return error.ConnectionRefused;
+        const w = connection.writer();
+
+        // ── Request line ──────────────────────────────────────────────
+        try w.writeAll(@tagName(req.method));
+        try w.writeByte(' ');
+        try req.uri.writeToStream(w, .{
+            .scheme = connection.proxied,
+            .authentication = connection.proxied,
+            .authority = connection.proxied,
+            .path = true,
+            .query = true,
+        });
+        try w.writeByte(' ');
+        try w.writeAll(@tagName(req.version));
+        try w.writeAll("\r\n");
+
+        // ── Host ──────────────────────────────────────────────────────
+        try w.writeAll("host: ");
+        try req.uri.writeToStream(w, .{ .authority = true });
+        try w.writeAll("\r\n");
+
+        // ── Connection ────────────────────────────────────────────────
+        if (req.keep_alive) {
+            try w.writeAll("connection: keep-alive\r\n");
+        } else {
+            try w.writeAll("connection: close\r\n");
+        }
+
+        // ── Accept-Encoding ───────────────────────────────────────────
+        // Emit the same accept-encoding the normal path would produce so
+        // that the response can be decoded correctly by receiveHead.
+        {
+            var has_any = false;
+            for (req.accept_encoding, 0..) |enabled, i| {
+                if (!enabled) continue;
+                const tag: http.ContentEncoding = @enumFromInt(i);
+                if (tag == .identity) continue;
+                if (has_any) try w.writeAll(", ");
+                if (!has_any) try w.writeAll("accept-encoding: ");
+                try w.writeAll(@tagName(tag));
+                has_any = true;
+            }
+            if (has_any) try w.writeAll("\r\n");
+        }
+
+        // ── Content-Length ────────────────────────────────────────────
+        try w.print("content-length: {d}\r\n", .{payload.len});
+
+        // ── Extra headers (includes Content-Type when set) ───────────
+        for (req.extra_headers) |header| {
+            try w.writeAll(header.name);
+            try w.writeAll(": ");
+            try w.writeAll(header.value);
+            try w.writeAll("\r\n");
+        }
+
+        // ── End of headers ────────────────────────────────────────────
+        try w.writeAll("\r\n");
+
+        // ── Body ──────────────────────────────────────────────────────
+        try w.writeAll(payload);
+        try connection.flush();
     }
 
     /// Helper: mark a node unhealthy by host+port (thread-safe).

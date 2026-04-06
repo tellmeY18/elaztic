@@ -110,6 +110,51 @@ pub const BulkConfig = bulk_indexer.BulkConfig;
 /// Result of a bulk flush operation.
 pub const BulkResult = bulk_indexer.BulkResult;
 
+/// Scroll API types and iterator.
+pub const scroll = @import("api/scroll.zig");
+
+/// Initial scroll search request type.
+pub const ScrollSearchRequest = scroll.ScrollSearchRequest;
+
+/// Request to fetch the next page of scroll results.
+pub const ScrollNextRequest = scroll.ScrollNextRequest;
+
+/// Request to clear a scroll context.
+pub const ClearScrollRequest = scroll.ClearScrollRequest;
+
+/// Scroll search response, generic over the document type.
+pub const ScrollSearchResponse = scroll.ScrollSearchResponse;
+
+/// Iterator that pages through scroll results one page at a time.
+pub const ScrollIterator = scroll.ScrollIterator;
+
+/// PIT (Point-in-Time) API types and iterator.
+pub const pit = @import("api/pit.zig");
+
+/// Request to open a point-in-time.
+pub const PitOpenRequest = pit.PitOpenRequest;
+
+/// Response from opening a point-in-time.
+pub const PitOpenResponse = pit.PitOpenResponse;
+
+/// Request to close a point-in-time.
+pub const PitCloseRequest = pit.PitCloseRequest;
+
+/// Request to search with a PIT context.
+pub const PitSearchRequest = pit.PitSearchRequest;
+
+/// Sort field specification for PIT searches.
+pub const SortField = pit.SortField;
+
+/// PIT search response, generic over the document type.
+pub const PitSearchResponse = pit.PitSearchResponse;
+
+/// A single hit in a PIT search response (includes sort values).
+pub const PitHit = pit.PitHit;
+
+/// Iterator that pages through PIT results using search_after.
+pub const PitIterator = pit.PitIterator;
+
 /// Query DSL builder — comptime-validated, composable query construction.
 pub const query = struct {
     pub const Query = @import("query/builder.zig").Query;
