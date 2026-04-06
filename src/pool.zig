@@ -149,8 +149,6 @@ pub const ConnectionPool = struct {
         body: ?[]const u8,
         compression: bool,
     ) !HttpResponse {
-        _ = compression; // std.http.Client negotiates Accept-Encoding automatically
-
         const http_method = parseMethod(method_str);
 
         var last_err: anyerror = error.MaxRetriesExceeded;
@@ -187,8 +185,16 @@ pub const ConnectionPool = struct {
             };
 
             // Open request via std.http.Client (handles keep-alive, connection reuse).
+            // When compression is disabled, override the Accept-Encoding header
+            // to "identity" so the server sends uncompressed responses.
+            // We cannot use the accept_encoding bool array for this because
+            // std.http.Client skips "identity" when emitting the header,
+            // producing a malformed header line when it's the only entry.
             var req = self.http_client.request(http_method, uri, .{
                 .extra_headers = &.{},
+                .headers = if (!compression) .{
+                    .accept_encoding = .{ .override = "identity" },
+                } else .{},
             }) catch |err| {
                 self.markNodeUnhealthyByHostPort(host, port);
                 last_err = err;
@@ -197,8 +203,17 @@ pub const ConnectionPool = struct {
             defer req.deinit();
 
             // Send headers + body.
+            // Note: std.http.Client asserts that sendBodiless() is only
+            // called for methods that never carry a body (GET, HEAD, etc.).
+            // For POST/PUT/DELETE without a body we send an empty payload.
             if (body) |payload| {
                 req.sendBodyComplete(@constCast(payload)) catch |err| {
+                    self.markNodeUnhealthyByHostPort(host, port);
+                    last_err = err;
+                    continue;
+                };
+            } else if (http_method.requestHasBody()) {
+                req.sendBodyComplete(@constCast(@as([]const u8, ""))) catch |err| {
                     self.markNodeUnhealthyByHostPort(host, port);
                     last_err = err;
                     continue;

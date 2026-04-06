@@ -135,7 +135,7 @@ pub fn build(b: *std.Build) void {
     // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
-    // Smoke tests (against ZincSearch, M1-M2)
+    // Smoke tests (against Elasticsearch/OpenSearch)
     const smoke_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/smoke/smoke_ping.zig"),
@@ -148,7 +148,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_smoke_tests = b.addRunArtifact(smoke_tests);
 
-    // Smoke roundtrip tests (M2 — serialize/deserialize round-trips + ZincSearch)
+    // Smoke roundtrip tests (M2 — serialize/deserialize round-trips + Elasticsearch)
     const smoke_roundtrip_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/smoke/smoke_roundtrip.zig"),
@@ -161,7 +161,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_smoke_roundtrip_tests = b.addRunArtifact(smoke_roundtrip_tests);
 
-    const smoke_step = b.step("test-smoke", "Run smoke tests (requires ZINC_URL and ZINC_AUTH)");
+    const smoke_step = b.step("test-smoke", "Run smoke tests (requires ES_URL)");
     smoke_step.dependOn(&run_smoke_tests.step);
     smoke_step.dependOn(&run_smoke_roundtrip_tests.step);
 

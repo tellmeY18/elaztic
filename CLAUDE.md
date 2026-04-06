@@ -33,8 +33,8 @@ nix develop .#ci       # minimal, for automation
 - Zig (stable or nightly depending on shell)
 - ZLS (Zig Language Server)
 - `just` task runner
-- `zinc` (ZincSearch binary) for lightweight smoke tests
-- `zinc-start` / `zinc-stop` / `zinc-status` helper scripts
+- `opensearch` (from nixpkgs, Apache 2.0 licensed)
+- `es-start` / `es-stop` / `es-status` helper scripts
 - `git`, `pkg-config`
 - Platform debugger: `gdb` + `valgrind` on Linux, `lldb` on macOS
 
@@ -50,65 +50,24 @@ nix build                    # build via Nix (reproducible)
 
 ---
 
-## Test Backend Strategy
+## Test Backend — Elasticsearch (OpenSearch)
 
-There are two tiers of test backend. Use the right one for each milestone.
+All tests (smoke and integration) run against OpenSearch, which is available
+as `pkgs.opensearch` from nixpkgs. OpenSearch is the Apache 2.0 licensed fork
+of Elasticsearch, wire-compatible with the ES 7.x REST API. It is fully
+managed by Nix — no Docker required.
 
-### Tier 1 — ZincSearch (smoke tests, M1–M2)
-
-ZincSearch (`zincsearch`) is available directly in the dev shell. It's a single
-Go binary, starts in under a second, uses ~50MB RAM, and requires zero config.
-
-**Important caveat:** ZincSearch is NOT a true Elasticsearch drop-in.
-Its ES-compatible query API (`/es` endpoints) is explicitly "work in progress"
-and does not implement the full ES Query DSL. Use it only to validate:
-- Basic HTTP transport (M1): can we connect, ping, get a response?
-- JSON round-trips (M2): do our serialize/deserialize types work?
-- Simple index/get/delete (early M4): do basic CRUD shapes work?
-
-Do NOT use ZincSearch to validate: nested bool queries, `terms` over large
-arrays, scroll, PIT, aggregations, index mappings, or anything M3+ depends on.
-It will either fail silently or return subtly wrong results.
-
-**Starting ZincSearch:**
+**Starting OpenSearch:**
 ```
-zinc-start      # starts on port 4080, data in .zinc-data/
-zinc-stop       # stops it
-zinc-status     # check if running
+es-start       # starts OpenSearch on port 9200, data in .opensearch-data/
+es-stop        # stops it
+es-status      # check if running
 ```
 
-ZincSearch UI is available at http://localhost:4080 when running.
-Default credentials: `admin` / `Complexpass#123`
+Set `ES_URL=http://localhost:9200` when running tests.
+Tests are skipped automatically if `ES_URL` is not set.
 
-ZincSearch uses port **4080**, not 9200. Set `ES_URL=http://localhost:4080`
-and `ES_AUTH=admin:Complexpass#123` when running smoke tests against it.
-
-### Tier 2 — Real Elasticsearch (integration tests, M3+)
-
-From M3 (Query DSL) onward, all integration tests must run against a real
-Elasticsearch 8.x instance. The dev shell provides a `just es-start` command
-that launches ES via Docker (Docker must be installed separately — it is not
-managed by Nix here).
-
-```
-just es-start    # docker run ES 8.x on port 9200, security disabled
-just es-stop     # stop and remove the container
-just es-logs     # tail ES logs
-```
-
-Set `ES_URL=http://localhost:9200` for integration tests against real ES.
-Integration tests are skipped automatically if `ES_URL` is not set.
-
-**Why not ES in Nix directly?** Elasticsearch changed its license to SSPL in
-2021, which is not OSI-approved. nixpkgs dropped it. The Docker image is the
-pragmatic path for local dev. CI uses the official Docker image too.
-
-**OpenSearch as an alternative:** If you prefer to avoid Docker or want a
-fully Nix-managed setup, OpenSearch (the Apache 2.0 ES fork) is available as
-`pkgs.opensearch` in nixpkgs and is wire-compatible with ES 7.10. Add it to
-the flake if needed.
-
-**Per-test index isolation:** Every integration test creates a fresh index
+**Per-test index isolation:** Every test creates a fresh index
 with a UUID-based name and tears it down in `defer`. Tests never share indices.
 
 ---
@@ -137,8 +96,8 @@ elaztic/
 │   │   └── deserialize.zig   # Comptime JSON deserializer (ES responses → structs)
 │   └── error.zig             # Error types and ES error envelope parsing
 ├── tests/
-│   ├── smoke/                # Against ZincSearch (M1-M2, no ES needed)
-│   └── integration/          # Against real ES 8.x (M3+)
+│   ├── smoke/                # Against Elasticsearch (OpenSearch)
+│   └── integration/          # Against Elasticsearch (OpenSearch)
 ├── examples/
 │   ├── basic_search.zig
 │   ├── bulk_index.zig
@@ -285,20 +244,20 @@ Retry on 429 and 503 with backoff. Never retry 4xx (except 429).
 ## Milestone Plan
 
 ### M1 — Transport Layer (weeks 1–3)
-**Test backend: ZincSearch**
+**Test backend: Elasticsearch (OpenSearch)**
 
 - [ ] `ConnectionPool` — persistent TCP connections, keep-alive, round-robin
 - [ ] HTTP/1.1 request serializer and response parser
 - [ ] gzip body compression (`std.compress.zlib`)
 - [ ] Retry logic with exponential backoff
-- [ ] Smoke test: `client.ping()` against ZincSearch on port 4080
+- [ ] Smoke test: `client.ping()` against Elasticsearch on port 9200
 
 Deliverable: `client.ping()` returns a cluster health response.
 
 ---
 
 ### M2 — JSON Infrastructure (weeks 4–5)
-**Test backend: ZincSearch**
+**Test backend: Elasticsearch (OpenSearch)**
 
 - [ ] Comptime struct serializer → ES JSON
 - [ ] Comptime JSON deserializer → typed structs
@@ -306,17 +265,14 @@ Deliverable: `client.ping()` returns a cluster health response.
 - [ ] `BulkResponse` — parse per-action results
 - [ ] `ErrorEnvelope` — parse ES error JSON
 - [ ] Unit tests with captured response fixtures (no network)
-- [ ] Smoke test: round-trip a struct through ZincSearch index → get
+- [ ] Smoke test: round-trip a struct through Elasticsearch index → get
 
-Deliverable: Typed round-trip works against ZincSearch.
+Deliverable: Typed round-trip works against Elasticsearch.
 
 ---
 
 ### M3 — Query DSL (weeks 6–8)
-**Test backend: Real Elasticsearch 8.x**
-
-Switch to real ES from this point. ZincSearch's query DSL compatibility
-is too incomplete to validate correctness of the query builder.
+**Test backend: Elasticsearch (OpenSearch)**
 
 - [ ] `FieldPath(T)` comptime field accessor with nested path support
 - [ ] `Query.term`, `Query.terms`, `Query.bool`, `Query.range`
@@ -324,14 +280,14 @@ is too incomplete to validate correctness of the query builder.
 - [ ] Aggregations: `terms`, `value_count`, `top_hits`
 - [ ] Source filtering
 - [ ] Unit tests: serialize each query type, diff against expected ES JSON
-- [ ] Integration tests against real ES: execute each query, assert hit counts
+- [ ] Integration tests against ES: execute each query, assert hit counts
 
 Deliverable: Full query DSL. Compile-time field validation works.
 
 ---
 
 ### M4 — Core API Operations (weeks 9–11)
-**Test backend: Real Elasticsearch 8.x**
+**Test backend: Elasticsearch (OpenSearch)**
 
 - [ ] `search`, `get`, `index`, `delete`, `count`
 - [ ] `createIndex`, `deleteIndex`, `putMapping`, `putAlias`, `refresh`
@@ -342,7 +298,7 @@ Deliverable: Complete CRUD surface.
 ---
 
 ### M5 — Bulk Indexer (weeks 12–13)
-**Test backend: Real Elasticsearch 8.x**
+**Test backend: Elasticsearch (OpenSearch)**
 
 - [ ] `BulkIndexer` with flush thresholds (doc count + byte size)
 - [ ] NDJSON stream builder (no per-doc allocation)
@@ -355,7 +311,7 @@ Deliverable: Can drive RF2 import workloads.
 ---
 
 ### M6 — Scroll + PIT (weeks 14–15)
-**Test backend: Real Elasticsearch 8.x**
+**Test backend: Elasticsearch (OpenSearch)**
 
 - [ ] `ScrollIterator` — page through results, auto-clear on `deinit`
 - [ ] Point-in-time: `openPit`, `closePit`, search with `search_after`
@@ -383,7 +339,7 @@ Deliverable: Can page through 500K+ concept documents.
 - [ ] Full doc comments on every public symbol
 - [ ] README with quickstart and examples
 - [ ] `build.zig.zon` for `zig fetch`
-- [ ] CI via GitHub Actions (unit tests always, integration tests with ES in Docker)
+- [ ] CI via GitHub Actions (unit tests always, integration tests with ES)
 - [ ] Examples: `basic_search.zig`, `bulk_index.zig`, `scroll_large.zig`
 - [ ] Publish to pkg.zig.guru
 
@@ -419,14 +375,14 @@ serializer must handle large `[]u64` slices efficiently.
 - Error envelope parsing against fixtures
 - FieldPath compile-error validation
 
-### `zig build test-smoke` (ZincSearch, M1–M2 only)
-- Requires `ZINC_URL=http://localhost:4080` and `ZINC_AUTH=admin:Complexpass#123`
-- Start with `zinc-start` from dev shell
-- Validates transport and basic JSON — not query DSL correctness
-
-### `zig build test-integration` (real ES, M3+)
+### `zig build test-smoke` (Elasticsearch, M1–M2)
 - Requires `ES_URL=http://localhost:9200`
-- Start with `just es-start` (Docker)
+- Start with `es-start` from dev shell
+- Validates transport and basic JSON round-trips
+
+### `zig build test-integration` (Elasticsearch, M3+)
+- Requires `ES_URL=http://localhost:9200`
+- Start with `es-start` from dev shell
 - Each test creates and destroys its own UUID-named index
 - Skipped automatically if `ES_URL` is unset
 
@@ -437,14 +393,15 @@ serializer must handle large `[]u64` slices efficiently.
 ```
 just build          # zig build
 just test           # unit tests only
-just smoke          # unit + smoke tests (start zinc-start first)
+just smoke          # unit + smoke tests (start es-start first)
 just integration    # all tests including ES integration
-just es-start       # docker run ES 8.x on :9200
-just es-stop        # stop ES container
-just es-logs        # tail ES container logs
+just es-start       # start OpenSearch on :9200 (from nix dev shell)
+just es-stop        # stop OpenSearch
+just es-status      # check if OpenSearch is running
+just es-logs        # tail OpenSearch logs
 just bench          # run throughput benchmarks
 just fmt            # zig fmt
-just clean          # rm -rf zig-out .zig-cache .zinc-data
+just clean          # rm -rf zig-out .zig-cache .opensearch-data
 ```
 
 ---
@@ -455,7 +412,7 @@ just clean          # rm -rf zig-out .zig-cache .zinc-data
 - **ES Query DSL:** https://www.elastic.co/guide/en/elasticsearch/reference/current/query-dsl.html
 - **ES Bulk API:** https://www.elastic.co/guide/en/elasticsearch/reference/current/docs-bulk.html
 - **ES PIT API:** https://www.elastic.co/guide/en/elasticsearch/reference/current/point-in-time-api.html
-- **ZincSearch ES-compat docs:** https://zincsearch-docs.zinc.dev/api-es-compatible/
+- **OpenSearch docs:** https://opensearch.org/docs/latest/
 - **zio-elasticsearch** (architecture reference): https://github.com/lambdaworks/zio-elasticsearch
 - **Snowstorm** (query patterns to support): https://github.com/IHTSDO/snowstorm
 

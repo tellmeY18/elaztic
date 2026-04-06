@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Milestone M2 — JSON Infrastructure ✅
 
 **Status: Complete**
-**Test backend: ZincSearch on port 4080**
+**Test backend: Elasticsearch (OpenSearch) on port 9200**
 
 #### Added
 
@@ -65,10 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     verify all fields including optionals (no network).
   - `smoke_search_response_parse` — parse a realistic ES `_search` response JSON into
     `SearchResponse(Concept)`, verify envelope and hit fields (no network).
-  - `smoke_zinc_index_roundtrip` — full end-to-end: serialize a doc with `elaztic.serialize`,
-    PUT it to ZincSearch via `std.http.Client` with Basic auth, search for it, deserialize
+  - `smoke_es_index_roundtrip` — full end-to-end: serialize a doc with `elaztic.serialize`,
+    PUT it to Elasticsearch via `std.http.Client`, search for it, deserialize
     the `SearchResponse` with `elaztic.deserialize`, verify field-level equality, and clean up.
-    Uses float64-safe IDs (ZincSearch stores numbers as float64, losing precision above 2^53).
 
 - **`build.zig`** — Added `smoke_roundtrip.zig` to the `test-smoke` build step.
 
@@ -80,30 +79,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [x] `BulkResponse` — parse per-action results
 - [x] `ErrorEnvelope` — parse ES error JSON
 - [x] Unit tests with captured response fixtures (no network)
-- [x] Smoke test: round-trip a struct through ZincSearch index → search
+- [x] Smoke test: round-trip a struct through Elasticsearch index → search
 
 #### Deliverable
 
 Typed JSON round-trip works: Zig structs serialize to ES-compatible JSON and
 ES responses (search, bulk, error) deserialize into typed Zig structs. Full
-end-to-end verified against ZincSearch.
-
-#### Known Limitations (ZincSearch only)
-
-- ZincSearch stores numbers as float64 — SNOMED concept IDs above 2^53
-  (e.g. `900000000000207008`) lose precision. Real Elasticsearch does not
-  have this limitation.
-- ZincSearch does not implement `GET /es/<index>/_doc/<id>` — smoke test
-  uses `_search` instead.
-- `ESClient` does not wire `basic_auth` into HTTP request headers yet — smoke
-  test uses `std.http.Client` directly with manual Authorization header.
+end-to-end verified against Elasticsearch (OpenSearch).
 
 ---
 
 ### Milestone M1 — Transport Layer ✅
 
 **Status: Complete**
-**Test backend: ZincSearch on port 4080**
+**Test backend: Elasticsearch (OpenSearch) on port 9200**
 
 #### Added
 
@@ -129,8 +118,8 @@ end-to-end verified against ZincSearch.
 - **`src/root.zig`** — Public API surface re-exporting `ESClient`, `ClientConfig`,
   `ClusterHealth`, `ElasticRequest`, `ESError`, `ConnectionPool`, `HttpResponse`, and `Node`.
 
-- **`tests/smoke/smoke_ping.zig`** — Smoke tests against ZincSearch:
-  - `smoke_ping_healthz` — verifies `/healthz` returns `{"status":"ok"}`.
+- **`tests/smoke/smoke_ping.zig`** — Smoke tests against Elasticsearch (OpenSearch):
+  - `smoke_ping_healthz` — verifies `/_cluster/health` returns a valid response.
   - `smoke_raw_request_root` — verifies a raw GET returns 200.
   - `smoke_connection_pool_reuse` — issues 5 sequential requests to verify keep-alive reuse.
 
@@ -143,11 +132,11 @@ end-to-end verified against ZincSearch.
 - [x] HTTP/1.1 request serializer and response parser (via `std.http.Client`)
 - [x] gzip body compression (`std.http.Client` negotiates Accept-Encoding automatically)
 - [x] Retry logic with exponential backoff (configurable count and initial delay)
-- [x] Smoke test: `client.rawRequest("GET", "/healthz", null)` against ZincSearch on port 4080
+- [x] Smoke test: `client.rawRequest("GET", "/", null)` against Elasticsearch (OpenSearch) on port 9200
 
 #### Deliverable
 
-`ESClient` connects to ZincSearch, issues HTTP requests, receives and parses JSON
+`ESClient` connects to Elasticsearch (OpenSearch), issues HTTP requests, receives and parses JSON
 responses, retries on transient failures, and reuses connections via keep-alive.
 
 ---
@@ -155,7 +144,6 @@ responses, retries on transient failures, and reuses connections via keep-alive.
 ### Initial Setup
 
 - Nix flake (`flake.nix`) with stable, nightly, and CI dev shells.
-- ZincSearch helper scripts: `zinc-start`, `zinc-stop`, `zinc-status`.
-- Elasticsearch Docker helpers: `es-start`, `es-stop`, `es-logs`, `es-status`.
+- Elasticsearch helper scripts: `es-start`, `es-stop`, `es-status`, `es-logs`.
 - `build.zig` and `build.zig.zon` for Zig 0.15.2.
 - `CLAUDE.md` project documentation with architecture, milestones, and conventions.

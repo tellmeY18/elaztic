@@ -6,10 +6,10 @@ zig-out/
 result
 result-*
 
-# ZincSearch local data
-.zinc-data/
-.zinc.log
-.zinc.pid
+# OpenSearch local data
+.opensearch-data/
+.opensearch.log
+.opensearch.pid
 
 # Editor / IDE
 .vscode/

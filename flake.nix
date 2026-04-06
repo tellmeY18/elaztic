@@ -24,154 +24,111 @@
         zigStable = pkgs.zig;
         zigMaster = zigpkgs.master;
 
-        # ── ZincSearch helpers ──────────────────────────────────────────────
-        # ZincSearch runs on port 4080 (not 9200). It is used for smoke tests
-        # only (M1–M2). Do NOT use it to validate query DSL correctness.
-        zincDataDir = ".zinc-data";
-        zincPort = "4080";
-        zincUser = "admin";
-        zincPass = "Complexpass#123";
-
-        zinc-start = pkgs.writeShellScriptBin "zinc-start" ''
-          set -euo pipefail
-          if pgrep -f "zinc server" > /dev/null 2>&1; then
-            echo "ZincSearch is already running on port ${zincPort}"
-            exit 0
-          fi
-          mkdir -p ${zincDataDir}
-          echo "Starting ZincSearch on port ${zincPort}..."
-          ZINC_FIRST_ADMIN_USER=${zincUser} \
-          ZINC_FIRST_ADMIN_PASSWORD="${zincPass}" \
-          ZINC_DATA_PATH=${zincDataDir} \
-          ZINC_SERVER_PORT=${zincPort} \
-            ${pkgs.zincsearch}/bin/zincsearch server &> .zinc.log &
-          echo $! > .zinc.pid
-          # Wait for it to be ready
-          for i in $(seq 1 20); do
-            if curl -sf -u "${zincUser}:${zincPass}" \
-                http://localhost:${zincPort}/healthz > /dev/null 2>&1; then
-              echo "ZincSearch ready at http://localhost:${zincPort}"
-              echo "Credentials: ${zincUser} / ${zincPass}"
-              echo "UI:          http://localhost:${zincPort}"
-              exit 0
-            fi
-            sleep 0.5
-          done
-          echo "ZincSearch did not start in time. Check .zinc.log"
-          exit 1
-        '';
-
-        zinc-stop = pkgs.writeShellScriptBin "zinc-stop" ''
-          set -euo pipefail
-          if [ -f .zinc.pid ]; then
-            PID=$(cat .zinc.pid)
-            if kill "$PID" 2>/dev/null; then
-              echo "Stopped ZincSearch (pid $PID)"
-            else
-              echo "Process $PID was not running"
-            fi
-            rm -f .zinc.pid
-          else
-            pkill -f "zinc server" 2>/dev/null && echo "Stopped ZincSearch" \
-              || echo "ZincSearch was not running"
-          fi
-        '';
-
-        zinc-status = pkgs.writeShellScriptBin "zinc-status" ''
-          if curl -sf -u "${zincUser}:${zincPass}" \
-              http://localhost:${zincPort}/healthz > /dev/null 2>&1; then
-            echo "ZincSearch is running on port ${zincPort}"
-            curl -s -u "${zincUser}:${zincPass}" \
-              http://localhost:${zincPort}/healthz
-          else
-            echo "ZincSearch is not running"
-            exit 1
-          fi
-        '';
-
-        # ── Elasticsearch Docker helpers ────────────────────────────────────
-        # Real ES 8.x is required for M3+ (Query DSL, Scroll, PIT, etc.).
-        # Requires Docker to be installed on the host (not managed by Nix).
+        # OpenSearch helpers
+        # OpenSearch (Apache 2.0) is wire-compatible with ES 7.x and available
+        # directly in nixpkgs. No Docker required. Used for all tests.
         esPort = "9200";
-        esImage = "docker.elastic.co/elasticsearch/elasticsearch:8.13.0";
-        esContainer = "elaztic-es";
+        esDataDir = ".opensearch-data";
 
         es-start = pkgs.writeShellScriptBin "es-start" ''
-          set -euo pipefail
-          if ! command -v docker &> /dev/null; then
-            echo "Docker is required for ES integration tests. Install Docker first."
-            exit 1
-          fi
-          if docker ps --format '{{.Names}}' | grep -q "^${esContainer}$"; then
-            echo "Elasticsearch is already running on port ${esPort}"
-            exit 0
-          fi
-          # Remove stopped container if it exists
-          docker rm -f ${esContainer} 2>/dev/null || true
-          echo "Starting Elasticsearch 8.x on port ${esPort}..."
-          docker run -d \
-            --name ${esContainer} \
-            -p ${esPort}:9200 \
-            -e "discovery.type=single-node" \
-            -e "xpack.security.enabled=false" \
-            -e "ES_JAVA_OPTS=-Xms512m -Xmx512m" \
-            --health-cmd "curl -sf http://localhost:9200/_cluster/health | grep -v '\"status\":\"red\"'" \
-            --health-interval 5s \
-            --health-timeout 3s \
-            --health-retries 20 \
-            ${esImage} > /dev/null
-          echo -n "Waiting for Elasticsearch to be ready"
-          for i in $(seq 1 40); do
+            set -euo pipefail
             if curl -sf http://localhost:${esPort}/_cluster/health > /dev/null 2>&1; then
-              echo ""
-              echo "Elasticsearch ready at http://localhost:${esPort}"
-              echo "Set ES_URL=http://localhost:${esPort} to run integration tests"
+              echo "OpenSearch is already running on port ${esPort}"
               exit 0
             fi
-            echo -n "."
-            sleep 2
-          done
-          echo ""
-          echo "Elasticsearch did not become healthy. Check: docker logs ${esContainer}"
-          exit 1
+
+            DATA_DIR="$(pwd)/${esDataDir}"
+            CONF_DIR="$DATA_DIR/config"
+            mkdir -p "$DATA_DIR/data" "$DATA_DIR/logs"
+
+            # Copy the entire default config directory from the Nix store.
+            # This includes log4j2.properties, jvm.options, security configs, etc.
+            # We use cp -rn so we don't clobber files from a previous run that
+            # the user may have customised.
+            cp -r ${pkgs.opensearch}/config/ "$CONF_DIR"
+            chmod -R u+w "$CONF_DIR"
+
+            # Overlay our local opensearch.yml on top of the default.
+            cat > "$CONF_DIR/opensearch.yml" <<EOFCFG
+          cluster.name: elaztic-dev
+          discovery.type: single-node
+          plugins.security.disabled: true
+          http.port: ${esPort}
+          path.data: $DATA_DIR/data
+          path.logs: $DATA_DIR/logs
+          EOFCFG
+
+            # Patch jvm.options: replace relative log paths with absolute paths
+            # pointing into our local data directory (Nix store is read-only).
+            sed -i.bak \
+              -e "s|file=logs/|file=$DATA_DIR/logs/|g" \
+              -e "s|-Xloggc:logs/|-Xloggc:$DATA_DIR/logs/|g" \
+              -e "s|ErrorFile=logs/|ErrorFile=$DATA_DIR/logs/|g" \
+              "$CONF_DIR/jvm.options"
+            rm -f "$CONF_DIR/jvm.options.bak"
+
+            # Point OpenSearch at our local config dir (not OPENSEARCH_HOME)
+            export OPENSEARCH_PATH_CONF="$CONF_DIR"
+            export OPENSEARCH_JAVA_OPTS="-Xms512m -Xmx512m"
+
+            echo "Starting OpenSearch on port ${esPort}..."
+            ${pkgs.opensearch}/bin/opensearch > .opensearch.log 2>&1 &
+            echo $! > .opensearch.pid
+
+            echo -n "Waiting for OpenSearch to be ready"
+            for i in $(seq 1 40); do
+              if curl -sf http://localhost:${esPort}/_cluster/health > /dev/null 2>&1; then
+                echo ""
+                echo "OpenSearch ready at http://localhost:${esPort}"
+                echo "Set ES_URL=http://localhost:${esPort} to run tests"
+                exit 0
+              fi
+              echo -n "."
+              sleep 2
+            done
+            echo ""
+            echo "OpenSearch did not start in time. Check .opensearch.log"
+            exit 1
         '';
 
         es-stop = pkgs.writeShellScriptBin "es-stop" ''
           set -euo pipefail
-          if docker ps --format '{{.Names}}' | grep -q "^${esContainer}$"; then
-            docker stop ${esContainer} > /dev/null
-            docker rm ${esContainer} > /dev/null
-            echo "Stopped and removed Elasticsearch container"
+          if [ -f .opensearch.pid ]; then
+            PID=$(cat .opensearch.pid)
+            if kill "$PID" 2>/dev/null; then
+              echo "Stopped OpenSearch (pid $PID)"
+            else
+              echo "Process $PID was not running"
+            fi
+            rm -f .opensearch.pid
           else
-            echo "Elasticsearch container is not running"
+            pkill -f opensearch 2>/dev/null && echo "Stopped OpenSearch" \
+              || echo "OpenSearch was not running"
           fi
-        '';
-
-        es-logs = pkgs.writeShellScriptBin "es-logs" ''
-          docker logs -f ${esContainer}
         '';
 
         es-status = pkgs.writeShellScriptBin "es-status" ''
           if curl -sf http://localhost:${esPort}/_cluster/health 2>/dev/null; then
             echo ""
           else
-            echo "Elasticsearch is not running on port ${esPort}"
+            echo "OpenSearch is not running on port ${esPort}"
             exit 1
           fi
         '';
 
-        # ── All helper scripts bundled ──────────────────────────────────────
+        es-logs = pkgs.writeShellScriptBin "es-logs" ''
+          tail -f .opensearch.log
+        '';
+
+        # All helper scripts bundled
         testHelpers = [
-          zinc-start
-          zinc-stop
-          zinc-status
           es-start
           es-stop
-          es-logs
           es-status
+          es-logs
         ];
 
-        # ── Common build inputs ─────────────────────────────────────────────
+        # Common build inputs
         buildInputs = [ ];
 
         nativeBuildInputs =
@@ -183,7 +140,7 @@
           ]
           ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ lldb ];
 
-        # ── Library derivation ──────────────────────────────────────────────
+        # Library derivation
         elaztic =
           zigCompiler:
           pkgs.stdenv.mkDerivation {
@@ -211,12 +168,13 @@
 
       in
       {
-        # ── Dev shells ────────────────────────────────────────────────────
+        # Dev shells
         devShells = {
           default = pkgs.mkShell {
             buildInputs = [
               zigStable
-              pkgs.zincsearch
+              pkgs.opensearch
+              pkgs.jdk21
             ]
             ++ buildInputs
             ++ testHelpers;
@@ -226,38 +184,31 @@
                 git
                 just
                 zls
-                curl # used by health check scripts
+                curl
               ]);
 
             shellHook = ''
-              echo "⚡ elaztic dev environment"
-              echo "Zig:  $(zig version)"
-              echo "Zinc: $(zinc --version 2>/dev/null | head -1 || echo 'available')"
+              echo "elaztic dev environment"
+              echo "Zig: $(zig version)"
               echo ""
-              echo "── Build ──────────────────────────────────"
+              echo "-- Build ------------------------------------------"
               echo "  zig build              build (debug)"
-              echo "  zig build test         unit tests"
               echo "  nix build              reproducible build"
               echo ""
-              echo "── Smoke tests (ZincSearch, M1-M2) ────────"
-              echo "  zinc-start             start ZincSearch on :4080"
-              echo "  zinc-stop              stop ZincSearch"
-              echo "  zinc-status            check ZincSearch health"
-              echo "  zig build test-smoke   run smoke tests"
+              echo "-- ES (OpenSearch on :9200) ------------------------"
+              echo "  es-start               start OpenSearch on :9200"
+              echo "  es-stop                stop OpenSearch"
+              echo "  es-status              check OpenSearch health"
+              echo "  es-logs                tail OpenSearch logs"
               echo ""
-              echo "── Integration tests (real ES, M3+) ────────"
-              echo "  es-start               docker run ES 8.x on :9200"
-              echo "  es-stop                stop ES container"
-              echo "  es-logs                tail ES logs"
-              echo "  zig build test-integration  run integration tests"
+              echo "-- Tests -------------------------------------------"
+              echo "  zig build test         unit tests"
+              echo "  zig build test-smoke   smoke tests (requires ES_URL)"
               echo ""
-              echo "── Shortcuts ───────────────────────────────"
+              echo "-- Shortcuts ---------------------------------------"
               echo "  just fmt               zig fmt"
               echo "  just clean             rm build artifacts"
-              echo "────────────────────────────────────────────"
-              echo ""
-              echo "⚠️  ZincSearch is for smoke tests only (M1-M2)."
-              echo "    Use es-start for M3+ query DSL / integration tests."
+              echo "----------------------------------------------------"
               echo ""
             '';
           };
@@ -265,7 +216,8 @@
           nightly = pkgs.mkShell {
             buildInputs = [
               zigMaster
-              pkgs.zincsearch
+              pkgs.opensearch
+              pkgs.jdk21
             ]
             ++ buildInputs
             ++ testHelpers;
@@ -279,9 +231,9 @@
               ]);
 
             shellHook = ''
-              echo "🌙 elaztic nightly dev environment"
+              echo "elaztic nightly dev environment"
               echo "Zig: $(zig version)"
-              echo "⚠️  Nightly Zig — expect potential instability"
+              echo "Nightly Zig -- expect potential instability"
               echo ""
             '';
           };
@@ -295,7 +247,7 @@
           };
         };
 
-        # ── Packages ──────────────────────────────────────────────────────
+        # Packages
         packages = {
           default = elaztic zigStable;
           nightly = elaztic zigMaster;
@@ -303,7 +255,7 @@
           elaztic-nightly = elaztic zigMaster;
         };
 
-        # ── Apps ──────────────────────────────────────────────────────────
+        # Apps
         apps = {
           default = {
             type = "app";
