@@ -137,27 +137,30 @@
           ]
           ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [lldb];
 
-        # Library derivation
+        # Library derivation — runs unit tests and installs source as a Zig package
         elaztic = zigCompiler:
           pkgs.stdenv.mkDerivation {
             pname = "elaztic";
-            version = "0.0.0";
+            version = "0.1.0";
             src = ./.;
             nativeBuildInputs = [zigCompiler] ++ nativeBuildInputs;
             inherit buildInputs;
             buildPhase = ''
               export HOME=$TMPDIR
-              zig build --cache-dir /tmp/zig-cache \
-                        --global-cache-dir /tmp/zig-global-cache \
-                        -Doptimize=ReleaseSafe
+              zig build test \
+                --cache-dir /tmp/zig-cache \
+                --global-cache-dir /tmp/zig-global-cache
             '';
             installPhase = ''
-              mkdir -p $out/bin
-              cp zig-out/bin/elaztic $out/bin/
+              mkdir -p $out/lib/zig
+              cp -r src $out/lib/zig/elaztic
+              cp build.zig build.zig.zon $out/lib/zig/
+              cp LICENSE $out/lib/zig/ 2>/dev/null || true
+              cp README.md $out/lib/zig/ 2>/dev/null || true
             '';
             meta = with pkgs.lib; {
-              description = "elaztic - Zig Elasticsearch client";
-              license = licenses.mit;
+              description = "elaztic - Production-grade Elasticsearch client library for Zig";
+              license = licenses.agpl3Only;
               platforms = platforms.all;
             };
           };
@@ -255,22 +258,6 @@
           nightly = elaztic zigMaster;
           elaztic = elaztic zigStable;
           elaztic-nightly = elaztic zigMaster;
-        };
-
-        # Apps
-        apps = {
-          default = {
-            type = "app";
-            program = "${self.packages.${system}.default}/bin/elaztic";
-          };
-          elaztic = {
-            type = "app";
-            program = "${self.packages.${system}.elaztic}/bin/elaztic";
-          };
-          nightly = {
-            type = "app";
-            program = "${self.packages.${system}.nightly}/bin/elaztic";
-          };
         };
 
         formatter = pkgs.alejandra;

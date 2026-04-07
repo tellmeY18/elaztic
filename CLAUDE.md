@@ -663,12 +663,312 @@ observability. All existing tests continue to pass. Memory safety verified under
 
 ### M8 — Polish + Publishing (weeks 18–20)
 
-- [ ] Full doc comments on every public symbol
-- [ ] README with quickstart and examples
-- [ ] `build.zig.zon` for `zig fetch`
-- [ ] CI via GitHub Actions (unit tests always, integration tests with ES)
-- [ ] Examples: `basic_search.zig`, `bulk_index.zig`, `scroll_large.zig`
-- [ ] Publish to pkg.zig.guru
+**Goal:** Make `elaztic` a first-class, discoverable, well-documented open-source
+Zig package that users can install with a single `zig fetch` command.
+
+**Reference libraries studied:**
+- `karlseguin/pg.zig` — README-as-docs pattern, standalone example project,
+  `build.zig.zon` structure, API reference inline in README
+- `elastic/elasticsearch-rs` — progressive disclosure (zero-config → URL → auth),
+  compatibility matrix, module-level doc tutorial, escape-hatch pattern
+- zigistry.dev — auto-indexed via GitHub `zig-package` topic
+
+**Current state entering M8:**
+- 167 unit tests + 44 integration/smoke tests = 211 total, all passing, zero leaks
+- CI already exists (`.github/workflows/ci.yml` + `release.yml`)
+- `build.zig.zon` exists but needs version + paths update
+- No `README.md`, no `examples/` directory, no `justfile`
+- Doc comments already present on most public symbols
+- License: AGPL-3.0
+
+---
+
+#### Phase 1 — Doc Comment Audit (`src/**/*.zig`)
+- [ ] Audit every `pub` symbol in `src/root.zig` — ensure `///` doc comment present
+- [ ] Audit `src/client.zig` — every public method on `ESClient` has `///` with:
+  - One-line summary
+  - Parameter descriptions (what each arg does, default behaviour)
+  - Return value description (what the caller receives, who owns the memory)
+  - Error conditions (which errors from `ESError` can be returned and when)
+  - Example usage snippet where non-obvious
+- [ ] Audit `src/pool.zig` — `ConnectionPool`, `Node`, `HttpResponse`, `LogEvent`, `LogLevel`
+- [ ] Audit `src/error.zig` — `ESError` variants, `ErrorEnvelope`, `parseErrorEnvelope`
+- [ ] Audit `src/request.zig` — `ElasticRequest` union and all variants
+- [ ] Audit `src/api/document.zig` — all request/response types and their methods
+- [ ] Audit `src/api/index_mgmt.zig` — all request types and their methods
+- [ ] Audit `src/api/search.zig` — `SearchRequest`, `CountRequest`, `SearchOptions`, responses
+- [ ] Audit `src/api/bulk.zig` — `BulkResponse`, `BulkItemResult`, `parseBulkResponse`
+- [ ] Audit `src/api/bulk_indexer.zig` — `BulkIndexer`, `BulkConfig`, `BulkResult`, all methods
+- [ ] Audit `src/api/scroll.zig` — all request/response types, `ScrollIterator` and its methods
+- [ ] Audit `src/api/pit.zig` — all request/response types, `PitIterator` and its methods
+- [ ] Audit `src/query/builder.zig` — `Query` namespace, every query constructor
+- [ ] Audit `src/query/field.zig` — `FieldPath`, `field()` function
+- [ ] Audit `src/query/aggregation.zig` — `Aggregation` namespace, all aggregation constructors
+- [ ] Audit `src/query/source_filter.zig` — `SourceFilter` and its variants
+- [ ] Audit `src/json/serialize.zig` — all public serialization functions
+- [ ] Audit `src/json/deserialize.zig` — all public deserialization functions, `TotalHits`, `Hit`, `HitsEnvelope`, `SearchResponse`
+- [ ] Add module-level `//!` doc comments to every file that lacks them (one-line summary of what the module provides)
+- [ ] Verify: every `deinit()` method documents what memory it frees
+- [ ] Verify: every function returning allocated memory documents caller-owns semantics
+
+#### Phase 2 — `root.zig` Module Tutorial
+- [ ] Expand the top-level `//!` doc comment in `src/root.zig` into a full tutorial (following the Rust ES client's `lib.rs` pattern):
+  - `//! # elaztic` — title
+  - `//! ## Overview` — one paragraph: what this library is, what ES versions it targets
+  - `//! ## Compatibility` — ES 7.x / 8.x, tested against OpenSearch
+  - `//! ## Quick Start` — progressive examples:
+    1. Zero-config: `ESClient.init(allocator, .{})` → `ping()`
+    2. Custom URL: `ESClient.initFromUrl(allocator, "http://es:9200")`
+    3. With auth: `ESClient.init(allocator, .{ .basic_auth = "user:pass" })`
+  - `//! ## Query DSL` — comptime field validation example (the key differentiator)
+  - `//! ## Bulk Indexing` — `BulkIndexer` example
+  - `//! ## Scrolling Large Result Sets` — `ScrollIterator` / `PitIterator`
+  - `//! ## Error Handling` — `ESError` switch example, retry semantics
+  - `//! ## Memory Ownership` — who owns what, `deinit()` patterns
+- [ ] Keep existing re-exports unchanged — only expand the `//!` header
+
+#### Phase 3 — README.md (`README.md`)
+
+The README is the primary documentation surface (Zig ecosystem convention: README = docs).
+Follows the `pg.zig` pattern of exhaustive inline API docs.
+
+- [ ] **Header section:**
+  - Title: `# elaztic`
+  - One-liner: `A production-grade Elasticsearch client library for Zig.`
+  - Badges: Zig version, license (AGPL-3.0), CI status, GitHub stars
+  - One paragraph: what it is, ES 7.x/8.x target, comptime field validation as key feature
+- [ ] **Compatibility section:**
+  - Table: elaztic version × ES version × OpenSearch version
+  - Note: tested against OpenSearch (Apache 2.0 fork, wire-compatible with ES 7.x REST API)
+  - Note: HTTP/1.1 only (no HTTP/2)
+  - Note: Zig 0.15.2+ required (tracked via `minimum_zig_version` in `build.zig.zon`)
+- [ ] **Install section** (two steps, following pg.zig pattern):
+  - Step 1: `zig fetch --save git+https://github.com/<owner>/elaztic`
+  - Step 2: `build.zig` snippet showing `b.dependency("elaztic", ...).module("elaztic")`
+  - Note about Nix: `nix develop` for reproducible toolchain
+- [ ] **Quick Start section** (progressive disclosure, following Rust ES client pattern):
+  - Example 1: Connect + ping (zero config, localhost:9200)
+  - Example 2: Index a document + get it back
+  - Example 3: Search with comptime-validated query DSL
+  - Each example is self-contained with imports, `main()`, error handling
+- [ ] **Query DSL section** (the key selling point — lead with it prominently):
+  - Comptime field path example: `field(Concept, "active")` vs compile error on typo
+  - `Query.term`, `Query.bool`, `Query.range`, `Query.match` examples
+  - Nested bool query example
+  - Aggregation example
+  - Source filtering example
+- [ ] **Document CRUD section:**
+  - `indexDoc` — with and without explicit ID
+  - `getDoc` — typed response
+  - `deleteDoc`
+  - `createIndex` / `deleteIndex` / `refresh` / `putMapping` / `putAlias`
+- [ ] **Bulk Indexing section:**
+  - `BulkIndexer` lifecycle: init → add → flush → deinit
+  - Auto-flush on `max_docs` / `max_bytes` thresholds
+  - `BulkResult` inspection: `hasFailures()`, `failedItems()`
+  - Performance note: >50K docs/sec target
+- [ ] **Scrolling & Point-in-Time section:**
+  - `ScrollIterator` example: init → `while (iter.next())` loop → auto-clear on `deinit()`
+  - `PitIterator` example: same pattern, preferred for read-heavy queries
+  - When to use scroll vs PIT
+  - Memory guarantee: one page in memory at a time
+- [ ] **Configuration section:**
+  - Full `ClientConfig` field reference with defaults
+  - `initFromUrl` for URL-based config
+  - Auth: `basic_auth` vs `api_key` (mutually exclusive, basic takes precedence)
+  - TLS: `scheme = "https"` (std.http.Client handles TLS natively)
+  - Retry: `retry_on_failure`, `retry_backoff_ms`, `max_retry_backoff_ms`
+  - Node recovery: `resurrect_after_ms`
+  - Logging: `log_fn` callback with `LogEvent` variants
+  - Compression: `compression = true` (gzip)
+- [ ] **Error Handling section:**
+  - `ESError` enum — every variant documented with when it occurs
+  - Retry semantics: 429 + 503 retried, other 4xx never retried
+  - `ErrorEnvelope` — parsed from ES JSON error responses
+  - Example: catching `IndexNotFound` vs `VersionConflict`
+- [ ] **Memory Ownership section:**
+  - Rule: caller owns memory returned by the library
+  - `deinit()` patterns: `ESClient`, `ClusterHealth`, `BulkResult`, `ErrorEnvelope`,
+    `ScrollIterator`, `PitIterator`
+  - Arena allocators: `BulkResponse._arena`, `ErrorEnvelope._arena`
+  - All tests run under `std.testing.allocator` (GPA) to catch leaks
+- [ ] **Building & Testing section:**
+  - `nix develop` — required, never install Zig globally
+  - `zig build` / `zig build test` / `zig build test-smoke` / `zig build test-integration`
+  - `es-start` / `es-stop` for OpenSearch
+  - `ES_URL=http://localhost:9200` environment variable
+  - `zig build bench` for throughput benchmarks
+- [ ] **License section:**
+  - AGPL-3.0 — link to LICENSE file
+
+#### Phase 4 — Examples (`examples/`)
+
+Standalone example project with its own `build.zig` + `build.zig.zon` (following
+the pg.zig pattern — proves the library is consumable as a dependency).
+
+- [ ] Create `examples/` directory
+- [ ] `examples/build.zig.zon` — standalone manifest declaring `elaztic` as a path dependency:
+  ```
+  .dependencies = .{ .elaztic = .{ .path = ".." } }
+  ```
+- [ ] `examples/build.zig` — builds each example as a separate executable, each importing `elaztic`
+- [ ] `examples/basic_search.zig` — Complete, runnable example:
+  - Connect to localhost:9200
+  - Create a UUID-named index
+  - Define a `Concept` struct with `id: u64`, `active: bool`, `module_id: u64`, `term: []const u8`
+  - Index 5 sample SNOMED-like concepts
+  - Refresh the index
+  - Search with `Query.bool` + `Query.term(field(Concept, "active"), true)` + `Query.range(field(Concept, "module_id")).gte(900000000000207008)`
+  - Print results
+  - Delete the index
+  - Proper error handling and `defer` cleanup throughout
+- [ ] `examples/bulk_index.zig` — Bulk indexing example:
+  - Connect to localhost:9200
+  - Create index
+  - Create `BulkIndexer` with `max_docs = 500`
+  - Index 1000 documents in a loop
+  - Show auto-flush behaviour
+  - Final manual `flush()`
+  - Print `BulkResult` stats (total, succeeded, failed, took_ms)
+  - Delete index
+- [ ] `examples/scroll_large.zig` — Scroll through large result set:
+  - Connect to localhost:9200
+  - Create index, bulk-index 200 documents
+  - Refresh
+  - Create `ScrollIterator` with `size = 50`
+  - Page through all results, print page count and hit count per page
+  - Auto-clear on `deinit()`
+  - Also demonstrate `PitIterator` as alternative
+  - Delete index
+- [ ] Each example has a comment header explaining what it demonstrates
+- [ ] Each example compiles and runs standalone: `cd examples && zig build run-basic-search`
+- [ ] Verify all examples run against OpenSearch (test manually with `es-start`)
+
+#### Phase 5 — `build.zig.zon` Finalization
+
+- [ ] Update `.version` from `"0.0.0"` to `"0.1.0"` (first public release)
+- [ ] Add `"LICENSE"` to `.paths` array (required for package distribution)
+- [ ] Add `"README.md"` to `.paths` array (displayed by registries and zig tools)
+- [ ] Verify `.minimum_zig_version = "0.15.2"` is correct
+- [ ] Verify `.name = .elaztic` matches the module name in `build.zig`
+- [ ] Keep `.fingerprint` unchanged (security/trust implications)
+- [ ] Remove boilerplate comments from the template (clean up for publishing)
+- [ ] Verify `zig fetch --save` works with a local path dependency
+
+#### Phase 6 — `build.zig` Cleanup
+
+- [ ] Remove excessive template comments (keep only comments that add value)
+- [ ] Verify module exposure: `b.addModule("elaztic", .{ .root_source_file = b.path("src/root.zig") })`
+- [ ] Verify all test steps are wired up: `test`, `test-smoke`, `test-integration`, `bench`
+- [ ] Add `test-all` step that depends on `test` + `test-smoke` + `test-integration`
+- [ ] Verify examples can be built from the examples directory
+- [ ] Ensure `zig build --help` output is clean and descriptive (step names + descriptions)
+- [ ] Remove the `exe` (CLI executable) build target — this is a library, not a CLI tool
+  - Remove `src/main.zig` executable build
+  - Remove `run` step
+  - Keep the `exe_tests` if they test anything useful, otherwise remove
+  - The `elaztic` module is the only thing consumers import
+
+#### Phase 7 — Justfile
+
+- [ ] Create `justfile` at project root with all commands from CLAUDE.md:
+  - `just build` → `zig build`
+  - `just test` → `zig build test --summary all`
+  - `just smoke` → `zig build test-smoke --summary all` (requires ES_URL)
+  - `just integration` → `zig build test-integration --summary all` (requires ES_URL)
+  - `just all` → `zig build test-all --summary all` (requires ES_URL)
+  - `just es-start` → `es-start`
+  - `just es-stop` → `es-stop`
+  - `just es-status` → `es-status`
+  - `just es-logs` → `tail -f .opensearch.log`
+  - `just bench` → `zig build bench`
+  - `just fmt` → `zig fmt src/ tests/ bench/ build.zig`
+  - `just fmt-check` → `zig fmt --check src/ tests/ bench/ build.zig`
+  - `just clean` → `rm -rf zig-out .zig-cache .opensearch-data`
+  - `just docs` → `zig build-lib src/root.zig -femit-docs` (if supported)
+  - `just loc` → line count summary (`find src/ -name '*.zig' | xargs wc -l`)
+- [ ] Add `justfile` to `.paths` in `build.zig.zon`? — No, not needed for package consumers
+
+#### Phase 8 — CI Hardening (`.github/workflows/ci.yml`)
+
+CI already exists and is functional. This phase hardens it.
+
+- [ ] Review `ci.yml` — verify all steps pass on current main branch
+- [ ] Add `zig fmt --check` to cover `examples/` directory (currently only `src/ tests/ bench/ build.zig`)
+- [ ] Add a dedicated "Examples Build" job:
+  - `cd examples && zig build` — verifies examples compile
+  - Does NOT run them (they need OpenSearch), but compilation proves the module import works
+- [ ] Add build matrix comment documenting what each job does
+- [ ] Review `release.yml`:
+  - Currently builds a CLI binary — update to package the library tarball instead
+  - Or remove binary release entirely (library consumers use `zig fetch`, not binaries)
+  - Create a source tarball that matches what `zig fetch` would download
+- [ ] Add GitHub Actions badge to README.md: `![CI](https://github.com/<owner>/elaztic/actions/workflows/ci.yml/badge.svg)`
+- [ ] Verify Nix cache is working (DeterminateSystems/magic-nix-cache-action)
+
+#### Phase 9 — GitHub Repository Metadata
+
+- [ ] Set GitHub repo description: `Production-grade Elasticsearch client library for Zig. Comptime-validated query DSL. ES 7.x/8.x.`
+- [ ] Add GitHub topics: `zig-package`, `elasticsearch`, `opensearch`, `zig`, `search`, `database-client`
+  - `zig-package` is required for zigistry.dev auto-indexing
+- [ ] Set repository URL in `build.zig.zon` or README (for discoverability)
+- [ ] Verify LICENSE file is AGPL-3.0 and properly detected by GitHub
+- [ ] Add a `.github/FUNDING.yml` if sponsorship is desired (optional)
+
+#### Phase 10 — Changelog + Version Tag
+
+- [ ] Update `Changelog.md` with M8 section:
+  - List all files created/modified
+  - Document README creation, examples, build.zig.zon updates
+  - Include M8 checklist (following the pattern of M1–M7 entries)
+- [ ] Review all milestone entries in Changelog.md for accuracy
+- [ ] Add release date to the `[Unreleased]` section header → `[0.1.0] — YYYY-MM-DD`
+- [ ] Create git tag `v0.1.0` after all M8 work is merged
+- [ ] Verify `release.yml` triggers on the tag push and creates a GitHub Release
+- [ ] Write release notes summarizing the full M1–M8 journey:
+  - Transport layer with connection pooling and keep-alive
+  - Comptime-validated query DSL (the key innovation)
+  - Full CRUD operations
+  - Bulk indexer with auto-flush (>50K docs/sec)
+  - Scroll + PIT iterators for large result sets
+  - Production hardening (jittered backoff, node recovery, auth, TLS, logging)
+  - 211+ tests, zero memory leaks
+
+#### Phase 11 — Publishing & Discoverability
+
+- [ ] Verify `zig fetch --save git+https://github.com/<owner>/elaztic` works from a fresh project
+- [ ] Create a minimal test project that depends on `elaztic` to verify the package is consumable:
+  - `zig init`
+  - Add dependency
+  - `@import("elaztic")` in main.zig
+  - `zig build` succeeds
+- [ ] zigistry.dev — no action needed beyond adding `zig-package` topic (Phase 9)
+  - Zigistry auto-crawls GitHub repos with the `zig-package` topic
+  - Verify listing appears after push (may take a few hours)
+- [ ] Update CLAUDE.md: replace `pkg.zig.guru` reference with `zigistry.dev`
+- [ ] Consider writing a short announcement post (Ziggit forum, Reddit r/zig) — optional
+
+#### Phase 12 — Final Verification
+
+- [ ] `zig build test --summary all` — all 167+ unit tests pass
+- [ ] `zig build test-smoke --summary all` — smoke tests pass against OpenSearch
+- [ ] `zig build test-integration --summary all` — all 44+ integration tests pass
+- [ ] `zig build bench` — bulk benchmark runs, >50K docs/sec on localhost
+- [ ] `zig fmt --check src/ tests/ bench/ build.zig` — no formatting issues
+- [ ] `cd examples && zig build` — all examples compile
+- [ ] `nix build` — reproducible Nix build succeeds
+- [ ] `nix flake check` — flake checks pass
+- [ ] Zero memory leaks across all test suites (GPA-verified)
+- [ ] README renders correctly on GitHub (check images, code blocks, badges)
+- [ ] `zig fetch --save` from a clean project succeeds
+- [ ] All CLAUDE.md milestone checkboxes are checked
+
+Deliverable: `elaztic` v0.1.0 published as a first-class Zig package. README serves
+as comprehensive documentation with progressive quickstart examples, full API reference,
+and the comptime field validation story front and center. Standalone examples prove the
+library is consumable. `zig fetch --save` works out of the box. Listed on zigistry.dev.
+CI validates formatting, unit tests, smoke tests, and integration tests on every push.
+211+ tests with zero memory leaks.
 
 ---
 

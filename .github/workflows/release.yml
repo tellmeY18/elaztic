@@ -8,78 +8,45 @@ on:
 permissions:
   contents: write
 
-# Cancel in-progress runs for the same tag
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: Build (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-linux
-            os: ubuntu-latest
-          - target: aarch64-linux
-            os: ubuntu-latest
-          - target: x86_64-macos
-            os: macos-latest
-          - target: aarch64-macos
-            os: macos-latest
-
+  test:
+    name: Pre-release Tests
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
-
-      - name: Cache Zig build artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            .zig-cache
-            ~/.cache/zig
-          key: zig-release-${{ matrix.target }}-${{ hashFiles('build.zig', 'build.zig.zon', 'src/**') }}
-          restore-keys: |
-            zig-release-${{ matrix.target }}-
-
-      - name: Build
-        run: nix develop .#ci --command zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }}
-
-      - name: Create tarball
-        run: tar -czf elaztic-${{ github.ref_name }}-${{ matrix.target }}.tar.gz -C zig-out/bin elaztic
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: elaztic-${{ matrix.target }}
-          path: elaztic-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Run unit tests
+        run: nix develop .#ci --command zig build test --summary all
+      - name: Start OpenSearch
+        run: nix develop .#ci --command es-start
+      - name: Run smoke tests
+        run: nix develop .#ci --command zig build test-smoke --summary all
+        env:
+          ES_URL: http://localhost:9200
+      - name: Run integration tests
+        run: nix develop .#ci --command zig build test-integration --summary all
+        env:
+          ES_URL: http://localhost:9200
+      - name: Stop OpenSearch
+        if: always()
+        run: nix develop .#ci --command es-stop
 
   release:
     name: Create Release
-    needs: build
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: elaztic-*
-          merge-multiple: true
-
+      - uses: actions/checkout@v4
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: elaztic-*.tar.gz
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}

@@ -1,7 +1,109 @@
-//! elaztic — Zig Elasticsearch Client Library
+//! # elaztic
 //!
-//! A production-grade Elasticsearch client for Zig, targeting ES 7.x and 8.x
-//! over HTTP/1.1. Designed for the Snowstorm SNOMED CT terminology server.
+//! A production-grade Elasticsearch client library for Zig.
+//!
+//! ## Overview
+//!
+//! `elaztic` provides a fully typed Elasticsearch client targeting ES 7.x and 8.x
+//! over HTTP/1.1. Its key innovation is **comptime-validated field paths** — query
+//! field names are checked at compile time against your document structs, so typos
+//! become compile errors rather than runtime surprises.
+//!
+//! ## Compatibility
+//!
+//! - **Elasticsearch:** 7.x, 8.x
+//! - **OpenSearch:** 1.x, 2.x (wire-compatible with ES 7.x REST API)
+//! - **Zig:** 0.15.2+ (tracked via `minimum_zig_version` in `build.zig.zon`)
+//! - **Transport:** HTTP/1.1 only (no HTTP/2)
+//!
+//! ## Quick Start
+//!
+//! ### Zero-config (localhost:9200)
+//!
+//! ```zig
+//! const elaztic = @import("elaztic");
+//!
+//! var client = try elaztic.ESClient.init(allocator, .{});
+//! defer client.deinit();
+//!
+//! var health = try client.ping();
+//! defer health.deinit(allocator);
+//! ```
+//!
+//! ### Custom URL
+//!
+//! ```zig
+//! var client = try elaztic.ESClient.initFromUrl(allocator, "http://es-node:9200");
+//! defer client.deinit();
+//! ```
+//!
+//! ### With authentication
+//!
+//! ```zig
+//! var client = try elaztic.ESClient.init(allocator, .{
+//!     .basic_auth = "elastic:changeme",
+//!     .scheme = "https",
+//! });
+//! defer client.deinit();
+//! ```
+//!
+//! ## Query DSL
+//!
+//! The comptime field path system catches field name typos at compile time:
+//!
+//! ```zig
+//! const Concept = struct { id: u64, active: bool, module_id: u64 };
+//! const f = elaztic.query.field;
+//! const Q = elaztic.query.Query;
+//!
+//! const q = Q.boolean(.{
+//!     .must = &.{
+//!         Q.term(f(Concept, "active"), .{ .bool = true }),
+//!         Q.range(f(Concept, "module_id")).gte(.{ .int = 900000000000207008 }),
+//!     },
+//! });
+//! // f(Concept, "typo") → compile error!
+//! ```
+//!
+//! ## Bulk Indexing
+//!
+//! ```zig
+//! var indexer = try client.bulkIndexer(.{ .max_docs = 1000 });
+//! defer indexer.deinit();
+//!
+//! for (documents) |doc| {
+//!     try indexer.add("my-index", doc_id, doc);
+//! }
+//! var result = try indexer.flush();
+//! defer result.deinit();
+//! ```
+//!
+//! ## Scrolling Large Result Sets
+//!
+//! For result sets that don't fit in memory, use `ScrollIterator` or `PitIterator`
+//! to page through results one page at a time:
+//!
+//! ```zig
+//! var iter = try client.scrollSearch(MyDoc, "my-index", query, .{ .size = 100 }, "1m");
+//! defer iter.deinit();
+//!
+//! while (try iter.next()) |hits| {
+//!     for (hits) |hit| {
+//!         // process hit._source
+//!     }
+//! }
+//! ```
+//!
+//! ## Error Handling
+//!
+//! All operations return typed errors from `ESError`. Transient errors (429, 503)
+//! are retried automatically with jittered exponential backoff.
+//!
+//! ## Memory Ownership
+//!
+//! Caller owns all memory returned by the library. Every type that allocates
+//! provides a `deinit()` method. All tests run under `std.testing.allocator`
+//! (GeneralPurposeAllocator in debug mode) to catch leaks.
 
 const std = @import("std");
 

@@ -5,7 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] — 2026-04-07
+
+### Milestone M8 — Polish + Publishing ✅
+
+**Status: Complete**
+
+#### Added
+
+- **`README.md`** — Comprehensive documentation covering install, quick start,
+  query DSL, document CRUD, index management, bulk indexing, scroll/PIT iteration,
+  configuration, error handling, and memory ownership. README serves as the primary
+  docs surface following Zig ecosystem convention.
+- **`examples/` directory** — Standalone example project with its own `build.zig`
+  and `build.zig.zon` proving the library is consumable as a dependency:
+  - `basic_search.zig` — Connect, index SNOMED concepts, search with comptime query DSL
+  - `bulk_index.zig` — Batch-index 500 docs with `BulkIndexer` auto-flush
+  - `scroll_large.zig` — Page through 200 docs with `ScrollIterator` and `PitIterator`
+- **`justfile`** — Task runner with all dev/test commands (`just build`, `just test`,
+  `just smoke`, `just integration`, `just all`, `just es-start`, `just bench`, etc.)
+- **`test-all` build step** — Runs unit + smoke + integration tests in one command
+- **`examples-build` CI job** — Verifies examples compile on every push
+- **Module tutorial in `root.zig`** — Expanded `//!` doc comment with overview,
+  compatibility, quick start examples, query DSL, bulk indexing, scrolling,
+  error handling, and memory ownership sections
+
+#### Changed
+
+- **`build.zig`** — Cleaned up from 274 lines to 83 lines:
+  - Removed all `zig init` template comments
+  - Removed CLI executable (`src/main.zig`, `run` step, `exe_tests`)
+  - Consolidated integration tests into a loop
+  - Added `test-all` step
+- **`build.zig.zon`** — Finalized for v0.1.0:
+  - Version bumped from `0.0.0` to `0.1.0`
+  - Added `LICENSE` and `README.md` to `.paths`
+  - Removed all boilerplate template comments
+- **`release.yml`** — Converted from cross-compiled binary release to source-only
+  GitHub Release (library consumers use `zig fetch`, not binaries). Added
+  pre-release test gate running unit + smoke + integration tests.
+- **`ci.yml`** — Added `examples-build` job to verify examples compile
+
+#### Removed
+
+- **`src/main.zig`** — CLI executable removed; this is a library, not a CLI tool
+
+#### M8 Checklist
+
+- [x] Doc comment audit — all public symbols have `///` doc comments
+- [x] Module tutorial in `root.zig` expanded with full usage guide
+- [x] `README.md` created with comprehensive documentation
+- [x] `examples/` directory with 3 standalone examples + build system
+- [x] `build.zig.zon` finalized (v0.1.0, paths, clean metadata)
+- [x] `build.zig` cleaned up (removed CLI, added `test-all`, loop for integration tests)
+- [x] `justfile` created with all dev/test commands
+- [x] CI hardened (examples build job, release workflow updated)
+- [x] Changelog updated with M8 section
+
+#### Deliverable
+
+`elaztic` v0.1.0 prepared for public release. README serves as comprehensive
+documentation with progressive quickstart examples, full API reference, and the
+comptime field validation story front and center. Standalone examples prove the
+library is consumable. `zig fetch --save` works out of the box. CI validates
+formatting, unit tests, smoke tests, integration tests, and example compilation.
+162+ unit tests with zero memory leaks.
+
+---
 
 ### Milestone M7 — Hardening ✅
 

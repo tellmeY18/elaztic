@@ -1,0 +1,16 @@
+.{
+    .name = .elaztic_examples,
+    .version = "0.0.0",
+    .fingerprint = 0xbc0dd2f062b2f288,
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{
+        .elaztic = .{ .path = ".." },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "basic_search.zig",
+        "bulk_index.zig",
+        "scroll_large.zig",
+    },
+}
