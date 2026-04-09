@@ -1,4 +1,10 @@
+
 # elaztic
+
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+[![Zig](https://img.shields.io/badge/Zig-0.15.2+-f7a41d?logo=zig&logoColor=white)](https://ziglang.org/)
+[![Elasticsearch](https://img.shields.io/badge/Elasticsearch-7.x%20%2F%208.x-005571?logo=elasticsearch&logoColor=white)](https://www.elastic.co/elasticsearch)
+[![OpenSearch](https://img.shields.io/badge/OpenSearch-1.x%20%2F%202.x-005EB8?logo=opensearch&logoColor=white)](https://opensearch.org/)
 
 A production-grade Elasticsearch client library for Zig.
 
